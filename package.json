@@ -138,6 +138,18 @@
           "type": "boolean",
           "default": false,
           "description": "Open the diff automatically when a commit is selected, instead of only on Enter/double-click."
+        },
+        "gitFileHistory.showPreview": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show the file preview pane next to the commit list. The pane can also be toggled in the view with P."
+        },
+        "gitFileHistory.previewMaxLines": {
+          "type": "number",
+          "default": 2000,
+          "minimum": 100,
+          "maximum": 20000,
+          "description": "Maximum number of lines shown in the file preview. Longer files are truncated; open the full version from the preview."
         }
       }
     }

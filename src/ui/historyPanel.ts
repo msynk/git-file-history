@@ -5,9 +5,19 @@ import { GitCancelledError, GitError } from '../git/gitExecutor';
 import type { GitService, RepositoryContext } from '../git/gitService';
 import type { CommitEntry, HistoryCursor, HistorySearch } from '../git/types';
 import { buildCommitUrl } from '../util/remoteUrl';
-import type { FileContext, FromWebview, LoadState, ToWebview } from './protocol';
+import type { FileContext, FromWebview, LoadState, PreviewResult, ToWebview } from './protocol';
 
 const VIEW_TYPE = 'gitFileHistory.view';
+
+/**
+ * Hard ceiling on the bytes read into a preview, independent of the line limit:
+ * a minified bundle can be a single enormous line, and the whole blob has to
+ * cross the webview boundary as a string.
+ */
+const PREVIEW_MAX_BYTES = 2_000_000;
+
+/** How many previews are kept. A commit's content is immutable, so they never go stale. */
+const PREVIEW_CACHE_LIMIT = 24;
 
 interface Target {
   uri: vscode.Uri;
@@ -29,6 +39,11 @@ export class HistoryPanel implements vscode.Disposable {
   private hasMore = false;
   private search: HistorySearch | undefined;
   private loading: vscode.CancellationTokenSource | undefined;
+  /** In-flight preview read, cancelled when the selection moves on. */
+  private previewLoading: vscode.CancellationTokenSource | undefined;
+  /** Guards against a slow preview landing after a newer one. */
+  private previewToken = 0;
+  private readonly previewCache = new Map<string, PreviewResult>();
   private headWatcher: vscode.FileSystemWatcher | undefined;
   /** Guards against a stale response overwriting a newer one. */
   private loadToken = 0;
@@ -102,6 +117,8 @@ export class HistoryPanel implements vscode.Disposable {
     }
     this.loading?.cancel();
     this.loading?.dispose();
+    this.previewLoading?.cancel();
+    this.previewLoading?.dispose();
     this.headWatcher?.dispose();
     for (const disposable of this.disposables) {
       disposable.dispose();
@@ -163,6 +180,8 @@ export class HistoryPanel implements vscode.Disposable {
     this.loading?.cancel();
     this.loading?.dispose();
     this.loading = undefined;
+    this.cancelPreview();
+    this.previewCache.clear();
     this.commits = [];
     this.cursor = undefined;
     this.hasMore = false;
@@ -178,6 +197,8 @@ export class HistoryPanel implements vscode.Disposable {
     this.loading?.cancel();
     this.loading?.dispose();
     this.loading = undefined;
+    this.cancelPreview();
+    this.previewCache.clear();
     this.commits = [];
     this.cursor = undefined;
     this.hasMore = false;
@@ -281,6 +302,9 @@ export class HistoryPanel implements vscode.Disposable {
         this.search = message.text ? { text: message.text, mode: message.mode } : undefined;
         await this.reload();
         return;
+      case 'preview':
+        await this.sendPreview(message.hash);
+        return;
       case 'openDiff':
         await this.openDiff(message.hash);
         return;
@@ -336,6 +360,95 @@ export class HistoryPanel implements vscode.Disposable {
   private setContext(file: FileContext): void {
     this.lastContext = file;
     this.post({ type: 'context', file, followRenames: this.followRenames() });
+  }
+
+  /**
+   * Reads the file as it stood at a commit and sends it to the view.
+   *
+   * A commit that deleted the file has nothing to show, so the preview falls
+   * back to its parent - the last state the file had - and says so.
+   */
+  private async sendPreview(hash: string): Promise<void> {
+    const commit = this.find(hash);
+    const target = this.target;
+    if (!commit || !target) {
+      return;
+    }
+
+    const cached = this.previewCache.get(hash);
+    if (cached) {
+      this.post({ type: 'preview', preview: cached });
+      return;
+    }
+
+    this.cancelPreview();
+    const source = new vscode.CancellationTokenSource();
+    this.previewLoading = source;
+    const token = ++this.previewToken;
+
+    const fromParent = commit.status === 'deleted';
+    const ref = fromParent ? commit.parents[0] : commit.hash;
+    const previewPath = fromParent ? (commit.previousPath ?? commit.path) : commit.path;
+
+    try {
+      let preview: PreviewResult;
+      if (!ref) {
+        preview = {
+          hash,
+          path: previewPath,
+          status: commit.status,
+          kind: 'missing',
+          message: 'The file was deleted in this commit, which has no parent to read it from.'
+        };
+      } else {
+        const buffer = await this.git.getFileAtCommit(target.repository.root, ref, previewPath, source.token, {
+          missingAsEmpty: false
+        });
+        if (token !== this.previewToken) {
+          return;
+        }
+        preview = buildPreview(commit, previewPath, buffer, this.previewMaxLines(), fromParent);
+      }
+      this.rememberPreview(preview);
+      this.post({ type: 'preview', preview });
+    } catch (error) {
+      if (error instanceof GitCancelledError || token !== this.previewToken) {
+        return;
+      }
+      const preview: PreviewResult = {
+        hash,
+        path: previewPath,
+        status: commit.status,
+        kind: error instanceof GitError ? 'missing' : 'error',
+        message: error instanceof GitError ? `This file does not exist at ${commit.shortHash}.` : String(error)
+      };
+      this.rememberPreview(preview);
+      this.post({ type: 'preview', preview });
+    } finally {
+      if (this.previewLoading === source) {
+        this.previewLoading = undefined;
+      }
+      source.dispose();
+    }
+  }
+
+  private cancelPreview(): void {
+    this.previewLoading?.cancel();
+    this.previewLoading?.dispose();
+    this.previewLoading = undefined;
+    this.previewToken++;
+  }
+
+  private rememberPreview(preview: PreviewResult): void {
+    if (this.previewCache.size >= PREVIEW_CACHE_LIMIT) {
+      // FIFO: the view walks history in order, so the oldest entry is the
+      // least likely to be asked for again.
+      const oldest = this.previewCache.keys().next();
+      if (!oldest.done) {
+        this.previewCache.delete(oldest.value);
+      }
+    }
+    this.previewCache.set(preview.hash, preview);
   }
 
   private async openDiff(hash: string): Promise<void> {
@@ -428,6 +541,10 @@ export class HistoryPanel implements vscode.Disposable {
     return vscode.workspace.getConfiguration('gitFileHistory').get<boolean>('followRenames', true);
   }
 
+  private previewMaxLines(): number {
+    return vscode.workspace.getConfiguration('gitFileHistory').get<number>('previewMaxLines', 2000);
+  }
+
   private renderHtml(): string {
     const webview = this.panel.webview;
     const media = (file: string) => webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, 'media', file));
@@ -436,6 +553,7 @@ export class HistoryPanel implements vscode.Disposable {
     const openDiffOnSelect = vscode.workspace
       .getConfiguration('gitFileHistory')
       .get<boolean>('openDiffOnSelect', false);
+    const showPreview = vscode.workspace.getConfiguration('gitFileHistory').get<boolean>('showPreview', true);
     const imageSources = gravatars ? `${webview.cspSource} https://www.gravatar.com data:` : `${webview.cspSource} data:`;
 
     return `<!DOCTYPE html>
@@ -447,12 +565,78 @@ export class HistoryPanel implements vscode.Disposable {
 <link href="${media('main.css')}" rel="stylesheet">
 <title>Git History</title>
 </head>
-<body data-gravatars="${gravatars}" data-open-diff-on-select="${openDiffOnSelect}">
+<body data-gravatars="${gravatars}" data-open-diff-on-select="${openDiffOnSelect}" data-show-preview="${showPreview}">
 <div id="app"></div>
 <script nonce="${nonce}" src="${media('main.js')}"></script>
 </body>
 </html>`;
   }
+}
+
+/**
+ * Turns a blob into something the view can render: text, or an explanation of
+ * why there is none. Truncation happens here rather than in the webview so a
+ * huge file never has to cross the message boundary in full.
+ */
+function buildPreview(
+  commit: CommitEntry,
+  filePath: string,
+  buffer: Buffer,
+  maxLines: number,
+  fromParent: boolean
+): PreviewResult {
+  const base = {
+    hash: commit.hash,
+    path: filePath,
+    status: commit.status,
+    bytes: buffer.length,
+    fromParent: fromParent || undefined
+  };
+
+  if (isBinary(buffer)) {
+    return { ...base, kind: 'binary', message: 'Binary file - there is nothing to show as text.' };
+  }
+
+  const head = buffer.length > PREVIEW_MAX_BYTES ? buffer.subarray(0, PREVIEW_MAX_BYTES) : buffer;
+  let truncated = head.length < buffer.length;
+  let text = head.toString('utf8');
+  // A byte-level cut can land mid-character or mid-line; drop the remainder.
+  if (truncated) {
+    const lastBreak = text.lastIndexOf('\n');
+    text = lastBreak > 0 ? text.slice(0, lastBreak) : text;
+  }
+  if (text.charCodeAt(0) === 0xfeff) {
+    text = text.slice(1);
+  }
+
+  const lines = text.length ? text.split(/\r?\n/) : [];
+  // A trailing newline leaves an empty last element that is not a real line.
+  if (lines.length && lines[lines.length - 1] === '') {
+    lines.pop();
+  }
+  if (lines.length > maxLines) {
+    lines.length = maxLines;
+    truncated = true;
+  }
+
+  return {
+    ...base,
+    kind: 'text',
+    content: lines.join('\n'),
+    lines: lines.length,
+    truncated: truncated || undefined
+  };
+}
+
+/** Same heuristic git uses: a NUL byte early in the file means binary. */
+function isBinary(buffer: Buffer): boolean {
+  const limit = Math.min(buffer.length, 8000);
+  for (let i = 0; i < limit; i++) {
+    if (buffer[i] === 0) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function createNonce(): string {

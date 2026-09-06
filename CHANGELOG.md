@@ -3,6 +3,16 @@
 All notable changes to Git File History are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- File preview pane: selecting a commit shows the file as it was at that commit,
+  with line numbers, optional soft wrapping and a draggable divider. Toggle it
+  with <kbd>P</kbd> or the preview button; the state is remembered per window.
+  A commit that deleted the file previews the version from its parent.
+- `gitFileHistory.showPreview` and `gitFileHistory.previewMaxLines` settings.
+
 ## [1.0.0] - 2026-09-06
 
 ### Added

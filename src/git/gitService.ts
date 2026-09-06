@@ -98,14 +98,18 @@ export class GitService implements vscode.Disposable {
     return loadHistoryPage(this.executor, query, token);
   }
 
-  /** Reads a file's contents at a commit. Empty when it does not exist there. */
+  /**
+   * Reads a file's contents at a commit. Empty when it does not exist there,
+   * unless `missingAsEmpty: false` asks for the git error instead.
+   */
   getFileAtCommit(
     root: string,
     ref: string,
     relativePath: string,
-    token?: vscode.CancellationToken
+    token?: vscode.CancellationToken,
+    options?: { missingAsEmpty?: boolean }
   ): Promise<Buffer> {
-    return readFileAtCommit(this.executor, root, ref, relativePath, token);
+    return readFileAtCommit(this.executor, root, ref, relativePath, token, options);
   }
 
   isTracked(root: string, relativePath: string, token?: vscode.CancellationToken): Promise<boolean> {

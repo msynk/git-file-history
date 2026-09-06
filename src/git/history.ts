@@ -58,21 +58,26 @@ export async function loadHistoryPage(
   };
 }
 
-/** Reads a file's contents at a revision. Empty when the path is absent there. */
+/**
+ * Reads a file's contents at a revision.
+ *
+ * A path that is absent at that revision - the commit that added the file, or
+ * one that deleted it - reads as empty by default, which is how a diff renders
+ * the missing side. Callers that need to tell "absent" from "empty" pass
+ * `missingAsEmpty: false` and handle the {@link GitError}.
+ */
 export async function readFileAtCommit(
   executor: GitExecutor,
   root: string,
   ref: string,
   relativePath: string,
-  token?: CancellationLike
+  token?: CancellationLike,
+  options?: { missingAsEmpty?: boolean }
 ): Promise<Buffer> {
   try {
     return await executor.runRaw(['show', `${ref}:${relativePath}`], { cwd: root, token });
   } catch (error) {
-    // A path that does not exist at that revision is expected - the commit that
-    // added the file, or one that deleted it - and renders as an empty side of
-    // the diff.
-    if (error instanceof GitError) {
+    if (error instanceof GitError && options?.missingAsEmpty !== false) {
       return Buffer.alloc(0);
     }
     throw error;

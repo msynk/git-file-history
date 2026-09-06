@@ -282,6 +282,21 @@ body {
   text-decoration: underline;
 }
 
+/* ----------------------------------------------------------------- body -- */
+
+/* The list and the preview share the space between header and footer. */
+.body {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: row;
+  min-height: 0;
+  min-width: 0;
+}
+
+.body.is-narrow {
+  flex-direction: column;
+}
+
 /* ----------------------------------------------------------------- list -- */
 
 .list {
@@ -685,6 +700,199 @@ kbd {
   .skeleton .bar {
     animation: none;
   }
+}
+
+/* -------------------------------------------------------------- preview -- */
+
+/* A drag handle with a hit area wider than the hairline it draws. */
+.splitter {
+  flex: 0 0 auto;
+  position: relative;
+  width: 7px;
+  margin: 0 -3px;
+  cursor: col-resize;
+  background: transparent;
+  z-index: 1;
+}
+
+.body.is-narrow .splitter {
+  width: auto;
+  height: 7px;
+  margin: -3px 0;
+  cursor: row-resize;
+}
+
+.splitter::after {
+  content: '';
+  position: absolute;
+  inset: 0 3px;
+  background: var(--gfh-border);
+}
+
+.body.is-narrow .splitter::after {
+  inset: 3px 0;
+}
+
+.splitter:hover::after,
+.splitter:focus-visible::after,
+.body.is-dragging .splitter::after {
+  background: var(--vscode-focusBorder, var(--vscode-textLink-foreground));
+}
+
+.splitter:focus-visible {
+  outline: none;
+}
+
+/* Dragging must not select list text under the pointer. */
+.body.is-dragging {
+  user-select: none;
+  cursor: col-resize;
+}
+
+.body.is-narrow.is-dragging {
+  cursor: row-resize;
+}
+
+.preview {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--vscode-editor-background);
+}
+
+.preview-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 10px 8px 14px;
+  border-bottom: 1px solid var(--gfh-border);
+}
+
+.preview-title {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.preview-name {
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.preview-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--gfh-muted);
+  font-size: 0.88em;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.preview-flag {
+  padding: 0 5px;
+  border-radius: 3px;
+  background: var(--vscode-badge-background, rgba(128, 128, 128, 0.25));
+  color: var(--vscode-badge-foreground, inherit);
+  font-size: 0.95em;
+}
+
+.preview-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.preview-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+
+/* --------------------------------------------------------------- code -- */
+
+.code {
+  padding: 6px 0 18px;
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: var(--vscode-editor-font-size, 12px);
+  line-height: 1.5;
+  /* Long lines scroll the pane rather than wrapping, unless wrapping is on. */
+  width: max-content;
+  min-width: 100%;
+}
+
+.code.wrap {
+  width: auto;
+}
+
+.code-line {
+  display: flex;
+  gap: 12px;
+  padding: 0 12px 0 0;
+}
+
+.code-line:hover {
+  background: var(--vscode-editor-lineHighlightBackground, rgba(128, 128, 128, 0.08));
+}
+
+.ln {
+  flex: 0 0 auto;
+  padding-left: 14px;
+  color: var(--vscode-editorLineNumber-foreground, var(--gfh-muted));
+  text-align: right;
+  user-select: none;
+}
+
+.lc {
+  flex: 1 1 auto;
+  white-space: pre;
+  tab-size: 4;
+}
+
+.code.wrap .lc {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.preview-cut {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--gfh-border);
+  color: var(--gfh-muted);
+  font-family: var(--vscode-font-family);
+  font-size: 0.92em;
+}
+
+.preview-skeleton {
+  padding: 10px 14px;
+}
+
+.preview-skeleton .bar {
+  height: 9px;
+  margin-bottom: 8px;
+  border-radius: 3px;
+  background: var(--vscode-foreground);
+  opacity: 0.08;
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .preview-skeleton .bar {
+    animation: none;
+  }
+}
+
+/* The preview keeps its own smaller empty states. */
+.preview .state {
+  margin: 40px auto;
 }
 
 /* --------------------------------------------------------------- footer -- */

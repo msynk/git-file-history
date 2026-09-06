@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import { JSDOM } from 'jsdom';
 import * as path from 'path';
 import type { CommitEntry } from '../../src/git/types';
-import type { FileContext, FromWebview, ToWebview } from '../../src/ui/protocol';
+import type { FileContext, FromWebview, PreviewResult, ToWebview } from '../../src/ui/protocol';
 
 /**
  * Runs the real webview script in jsdom. These tests cover the parts of the UI
@@ -43,6 +43,19 @@ function commit(overrides: Partial<CommitEntry> = {}): CommitEntry {
     status: 'modified',
     insertions: 4,
     deletions: 2,
+    ...overrides
+  };
+}
+
+function preview(overrides: Partial<PreviewResult> = {}): PreviewResult {
+  const content = overrides.content ?? 'const a = 1;';
+  return {
+    hash: 'a'.repeat(40),
+    path: 'src/parser.ts',
+    status: 'modified',
+    kind: 'text',
+    lines: content ? content.split('\n').length : 0,
+    bytes: content ? content.length : 0,
     ...overrides
   };
 }
@@ -408,6 +421,133 @@ describe('webview', () => {
     const headerIcon = harness.document.querySelector('.title-row svg');
     assert.ok(headerIcon, 'the header should render a file icon');
     assert.ok(headerIcon!.classList.contains('file-icon'));
+  });
+
+  it('asks for the file content of the selected commit', async () => {
+    const harness = createHarness();
+    seed(harness, [commit({ hash: '1'.repeat(40) }), commit({ hash: '2'.repeat(40) })]);
+
+    key(harness, harness.document.querySelector('.list')!, { key: 'ArrowDown' });
+    assert.ok(!harness.sent.some((message) => message.type === 'preview'), 'the request should be debounced');
+
+    await delay(200);
+    assert.deepStrictEqual(lastSent(harness), { type: 'preview', hash: '1'.repeat(40) });
+  });
+
+  it('renders the previewed file with line numbers', async () => {
+    const harness = createHarness();
+    seed(harness, [commit({ hash: '1'.repeat(40) })]);
+    harness.rows()[0].dispatchEvent(new harness.window.MouseEvent('click', { bubbles: true }));
+    await delay(200);
+
+    harness.receive({
+      type: 'preview',
+      preview: preview({ hash: '1'.repeat(40), content: 'const a = 1;\n\nexport = a;', lines: 3 })
+    });
+
+    const lines = Array.from(harness.document.querySelectorAll('.code-line'));
+    assert.strictEqual(lines.length, 3);
+    assert.deepStrictEqual(
+      lines.map((line) => line.querySelector('.ln')?.textContent),
+      ['1', '2', '3']
+    );
+    assert.strictEqual(lines[0].querySelector('.lc')?.textContent, 'const a = 1;');
+    assert.ok(harness.text('.preview-meta').includes('3 lines'));
+    assert.ok(harness.text('.preview-name').includes('parser.ts'));
+  });
+
+  it('ignores a preview for a commit the selection has moved past', async () => {
+    const harness = createHarness();
+    seed(harness, [commit({ hash: '1'.repeat(40) }), commit({ hash: '2'.repeat(40) })]);
+    const list = harness.document.querySelector('.list')!;
+    key(harness, list, { key: 'ArrowDown' });
+    await delay(200);
+    key(harness, list, { key: 'ArrowDown' });
+    await delay(200);
+
+    harness.receive({ type: 'preview', preview: preview({ hash: '1'.repeat(40), content: 'stale' }) });
+    assert.strictEqual(harness.document.querySelectorAll('.code-line').length, 0);
+
+    harness.receive({ type: 'preview', preview: preview({ hash: '2'.repeat(40), content: 'fresh' }) });
+    assert.strictEqual(harness.text('.code-line .lc'), 'fresh');
+  });
+
+  it('explains a version that has no text to show', async () => {
+    const harness = createHarness();
+    seed(harness, [commit()]);
+    harness.rows()[0].dispatchEvent(new harness.window.MouseEvent('click', { bubbles: true }));
+    await delay(200);
+
+    harness.receive({
+      type: 'preview',
+      preview: preview({ kind: 'binary', content: undefined, message: 'Binary file - there is nothing to show as text.' })
+    });
+
+    assert.strictEqual(harness.document.querySelectorAll('.code-line').length, 0);
+    assert.ok(harness.text('.preview-body').includes('Binary file'));
+  });
+
+  it('flags a truncated preview and offers the full file', async () => {
+    const harness = createHarness();
+    seed(harness, [commit()]);
+    harness.rows()[0].dispatchEvent(new harness.window.MouseEvent('click', { bubbles: true }));
+    await delay(200);
+
+    harness.receive({ type: 'preview', preview: preview({ content: 'a\nb', lines: 2, truncated: true }) });
+
+    assert.ok(harness.text('.preview-meta').includes('truncated'));
+    const cut = harness.document.querySelector('.preview-cut');
+    assert.ok(cut, 'a truncated preview should say where it stops');
+    (cut!.querySelector('button') as HTMLElement).dispatchEvent(new harness.window.MouseEvent('click', { bubbles: true }));
+    assert.deepStrictEqual(lastSent(harness), { type: 'openFile', hash: 'a'.repeat(40) });
+  });
+
+  it('says the file was read from the parent when the commit deleted it', async () => {
+    const harness = createHarness();
+    seed(harness, [commit({ status: 'deleted' })]);
+    harness.rows()[0].dispatchEvent(new harness.window.MouseEvent('click', { bubbles: true }));
+    await delay(200);
+
+    harness.receive({ type: 'preview', preview: preview({ status: 'deleted', content: 'gone', fromParent: true }) });
+    assert.ok(harness.text('.preview-meta').includes('before deletion'));
+  });
+
+  it('hides the preview with P and stops requesting content', async () => {
+    const harness = createHarness();
+    seed(harness, [commit()]);
+    const pane = harness.document.querySelector('.preview')!;
+    assert.ok(!pane.classList.contains('hidden'));
+
+    key(harness, harness.document.body, { key: 'p' });
+    assert.ok(pane.classList.contains('hidden'));
+
+    harness.rows()[0].dispatchEvent(new harness.window.MouseEvent('click', { bubbles: true }));
+    await delay(200);
+    assert.ok(!harness.sent.some((message) => message.type === 'preview'), 'a hidden preview should not ask for content');
+
+    key(harness, harness.document.body, { key: 'p' });
+    await delay(200);
+    assert.deepStrictEqual(lastSent(harness), { type: 'preview', hash: 'a'.repeat(40) });
+  });
+
+  it('previews the newest commit before anything is selected', async () => {
+    const harness = createHarness();
+    seed(harness, [commit({ hash: '1'.repeat(40) }), commit({ hash: '2'.repeat(40) })]);
+    await delay(200);
+    assert.deepStrictEqual(lastSent(harness), { type: 'preview', hash: '1'.repeat(40) });
+  });
+
+  it('clears the preview on reset', async () => {
+    const harness = createHarness();
+    seed(harness, [commit()]);
+    harness.rows()[0].dispatchEvent(new harness.window.MouseEvent('click', { bubbles: true }));
+    await delay(200);
+    harness.receive({ type: 'preview', preview: preview({ content: 'first' }) });
+    assert.strictEqual(harness.document.querySelectorAll('.code-line').length, 1);
+
+    harness.receive({ type: 'reset' });
+    assert.strictEqual(harness.document.querySelectorAll('.code-line').length, 0);
+    assert.ok(harness.text('.preview-body').includes('No commit selected'));
   });
 
   it('escapes untrusted commit text rather than interpreting it as markup', () => {

@@ -19,6 +19,7 @@ This extension does one thing well. Open a file, press one button, read its stor
 - **Reachable from anywhere** - editor title bar, editor context menu, Explorer, open editors, the SCM view, the Command Palette, or <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>H</kbd> (<kbd>Cmd</kbd>+<kbd>Alt</kbd>+<kbd>H</kbd> on macOS).
 - **A readable timeline** - commit message, author avatar, relative time (exact date on hover), short SHA, branch and tag badges, change type, and lines added/removed.
 - **Follows renames** - history does not stop at the commit that moved the file, and the rename itself is called out.
+- **Preview beside the timeline** - selecting a commit shows the whole file as it was at that point, with line numbers, in a resizable pane. Toggle it with <kbd>P</kbd>.
 - **Diff in one keystroke** - <kbd>Enter</kbd> opens the file's diff for the selected commit in VS Code's own diff editor.
 - **Search two ways** - filter the loaded commits as you type, or press <kbd>Enter</kbd> to search the whole history by commit message (`--grep`) or by *changed content* (`-S`, the pickaxe) to find when a line was introduced.
 - **Incremental loading** - history arrives one page at a time and older commits are fetched as you scroll or arrow down.
@@ -43,10 +44,18 @@ This extension does one thing well. Open a file, press one button, read its stor
 | Filter loaded commits | Type in the search box |
 | Search the whole history | Type, then <kbd>Enter</kbd> |
 | Search by changed content | Switch the mode to **Content**, type, then <kbd>Enter</kbd> |
+| Show or hide the file preview | <kbd>P</kbd>, or the preview button |
+| Resize the preview | Drag the divider, or focus it and use the arrow keys |
 | Refresh | <kbd>F5</kbd>, or the refresh button |
 | Focus the search box | <kbd>/</kbd> or <kbd>Ctrl</kbd>+<kbd>F</kbd> |
 
-Selecting a commit reveals its full message and these actions:
+Selecting a commit shows the file as it stood at that commit in the preview pane
+beside the list - line numbers, optional soft wrapping, and buttons to open the
+diff or the full version in an editor. Long files are truncated to keep the view
+responsive, and the pane says so. A commit that deleted the file shows the last
+version before the deletion.
+
+Selecting a commit also reveals its full message and these actions:
 
 - **Open diff** - the file's change in that commit, against its parent.
 - **Open file at this commit** - the whole file as it was, read-only.
@@ -66,6 +75,8 @@ Sensible defaults; almost nothing to configure.
 | `gitFileHistory.followRenames` | `true` | Follow the file across renames and moves (`git log --follow`). |
 | `gitFileHistory.showGravatars` | `false` | Load author avatars from Gravatar. Off by default: generated initial avatars need no network requests. |
 | `gitFileHistory.openDiffOnSelect` | `false` | Open the diff as soon as a commit is selected, rather than on <kbd>Enter</kbd>. |
+| `gitFileHistory.showPreview` | `true` | Show the file preview pane. The view remembers the toggle and the pane's size per window. |
+| `gitFileHistory.previewMaxLines` | `2000` | Lines shown in the preview before it is truncated. |
 
 The extension uses the git binary VS Code already resolved, so the `git.path` setting is honoured automatically.
 
@@ -156,6 +167,7 @@ npx @vscode/vsce package
 - History is read from the current branch, as `git log <file>` sees it. There is no branch picker - this is a file history view, not a Git client.
 - Whole-history message search uses `--grep`, which matches commit messages; author and SHA matching apply to the commits already loaded.
 - Commit URLs are built for GitHub, GitLab, Bitbucket and Azure DevOps. Self-hosted instances on other domains hide the "Open on remote" action rather than guess a URL that would 404.
+- The preview is plain text: no syntax highlighting, and binary files are named rather than rendered. Open the version in an editor for a highlighted, searchable copy.
 
 ## License
 

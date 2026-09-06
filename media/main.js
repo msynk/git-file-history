@@ -12,6 +12,8 @@
 
   /** @typedef {{hash:string,shortHash:string,parents:string[],authorName:string,authorEmail:string,authorDate:number,committerName:string,committerEmail:string,commitDate:number,subject:string,body:string,refs:{kind:string,name:string}[],path:string,previousPath?:string,status:string,insertions?:number,deletions?:number}} Commit */
 
+  /** @typedef {{hash:string,path:string,status:string,kind:'text'|'binary'|'missing'|'error',content?:string,lines?:number,bytes?:number,truncated?:boolean,fromParent?:boolean,message?:string}} Preview */
+
   const state = {
     /** @type {{uri:string,fileName:string,relativePath:string,repositoryName:string,branch?:string,hasRemote:boolean}|null} */
     file: null,
@@ -33,11 +35,42 @@
     /** @type {string|null} */
     expanded: null,
     stale: false,
-    loadingMore: false
+    loadingMore: false,
+    /** Whether the side-by-side file preview is showing. */
+    previewOpen: true,
+    /** Preview width in a wide panel, height in a narrow one. Pixels. */
+    previewSize: 460,
+    /** Soft-wrap long lines instead of scrolling sideways. */
+    previewWrap: false,
+    /** Commit whose content the preview is showing or waiting for. */
+    previewHash: /** @type {string|null} */ (null),
+    /** @type {Preview|null} */
+    preview: null,
+    previewLoading: false
   };
 
   const useGravatars = document.body.dataset.gravatars === 'true';
   const openDiffOnSelect = document.body.dataset.openDiffOnSelect === 'true';
+
+  // The panel is rebuilt from scratch every time it is revealed, so the layout
+  // choices the user made are restored from the webview's persisted state; the
+  // setting only provides the starting point.
+  const persisted = vscode.getState() || {};
+  state.previewOpen =
+    typeof persisted.previewOpen === 'boolean' ? persisted.previewOpen : document.body.dataset.showPreview !== 'false';
+  state.previewWrap = persisted.previewWrap === true;
+  if (typeof persisted.previewSize === 'number' && persisted.previewSize > 0) {
+    state.previewSize = persisted.previewSize;
+  }
+
+  function saveState() {
+    vscode.setState({
+      uri: state.file ? state.file.uri : undefined,
+      previewOpen: state.previewOpen,
+      previewSize: state.previewSize,
+      previewWrap: state.previewWrap
+    });
+  }
 
   // --------------------------------------------------------------- icons --
 
@@ -53,6 +86,8 @@
     close: 'M4 4l8 8M12 4l-8 8',
     history: 'M8 4.5V8l2.5 1.5M2.5 8a5.5 5.5 0 1 0 1.6-3.9M2.5 3v3h3',
     warn: 'M8 2.5 15 14H1L8 2.5ZM8 6.5v4M8 12.2v.6',
+    preview: 'M2.5 3h11a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1ZM9.5 3v10',
+    wrap: 'M2.5 4h11M2.5 8h8a2.5 2.5 0 0 1 0 5H6M8 11l-2 2 2 2M2.5 12.5h2',
     empty: 'M3 4.5h10M3 8h10M3 11.5h6'
   };
 
@@ -238,13 +273,26 @@
     [icon('refresh')]
   );
 
+  const previewToggle = el(
+    'button',
+    {
+      class: 'icon-button',
+      type: 'button',
+      title: 'Toggle file preview (P)',
+      'aria-label': 'Toggle file preview',
+      'aria-pressed': String(state.previewOpen),
+      onclick: () => togglePreview()
+    },
+    [icon('preview')]
+  );
+
   const banner = el('div', { class: 'banner hidden' }, [
     el('span', { text: 'The repository changed since this history was loaded.' }),
     el('button', { type: 'button', text: 'Refresh', onclick: refresh })
   ]);
 
   const header = el('header', { class: 'header' }, [
-    el('div', { class: 'title-row' }, [icon('file', 16, 'file-icon'), fileNameEl, fileDirEl, refreshButton]),
+    el('div', { class: 'title-row' }, [icon('file', 16, 'file-icon'), fileNameEl, fileDirEl, previewToggle, refreshButton]),
     metaRow,
     el('div', { class: 'search-row' }, [
       el('div', { class: 'search-box' }, [icon('search'), searchInput]),
@@ -261,10 +309,26 @@
     'aria-label': 'File history'
   });
 
+  // ------------------------------------------------------------- preview --
+
+  const previewHead = el('div', { class: 'preview-head' });
+  const previewBody = el('div', { class: 'preview-body' });
+  const previewPane = el('aside', { class: 'preview', 'aria-label': 'File preview' }, [previewHead, previewBody]);
+
+  const splitter = el('div', {
+    class: 'splitter',
+    role: 'separator',
+    tabindex: '0',
+    'aria-label': 'Resize the file preview',
+    'aria-orientation': 'vertical'
+  });
+
+  const body = el('div', { class: 'body' }, [list, splitter, previewPane]);
+
   const footer = el('footer', { class: 'footer' });
   const liveRegion = el('div', { class: 'visually-hidden', role: 'status', 'aria-live': 'polite' });
 
-  app.append(header, list, footer, liveRegion);
+  app.append(header, body, footer, liveRegion);
 
   // -------------------------------------------------------------- filters --
 
@@ -489,6 +553,262 @@
     ]);
   }
 
+  // ------------------------------------------------------ preview pane --
+
+  /** Bytes as something short enough for the preview header. */
+  function formatBytes(bytes) {
+    if (typeof bytes !== 'number') {
+      return '';
+    }
+    if (bytes < 1024) {
+      return `${bytes} B`;
+    }
+    if (bytes < 1024 * 1024) {
+      return `${(bytes / 1024).toFixed(bytes < 10240 ? 1 : 0)} KB`;
+    }
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  }
+
+  function applyPreviewLayout() {
+    previewPane.classList.toggle('hidden', !state.previewOpen);
+    splitter.classList.toggle('hidden', !state.previewOpen);
+    previewPane.style.flexBasis = `${state.previewSize}px`;
+    previewToggle.setAttribute('aria-pressed', String(state.previewOpen));
+  }
+
+  /** True when the panel is too narrow to sit the preview beside the list. */
+  function isNarrow() {
+    return body.classList.contains('is-narrow');
+  }
+
+  function renderPreview() {
+    applyPreviewLayout();
+    if (!state.previewOpen) {
+      return;
+    }
+
+    previewHead.textContent = '';
+    previewBody.textContent = '';
+
+    const commit = state.commits.find((item) => item.hash === state.previewHash);
+    if (!commit) {
+      previewBody.appendChild(
+        el('div', { class: 'state' }, [
+          icon('file', 30),
+          el('h2', { text: 'No commit selected' }),
+          el('p', { text: 'Select a commit to see the file as it was at that point.' })
+        ])
+      );
+      return;
+    }
+
+    previewHead.append(renderPreviewTitle(commit), renderPreviewActions(commit));
+
+    if (state.previewLoading || !state.preview || state.preview.hash !== commit.hash) {
+      previewBody.appendChild(renderPreviewSkeleton());
+      return;
+    }
+    previewBody.appendChild(renderPreviewContent(state.preview));
+  }
+
+  /** @param {Commit} commit */
+  function renderPreviewTitle(commit) {
+    const preview = state.preview && state.preview.hash === commit.hash ? state.preview : null;
+    const filePath = preview ? preview.path : commit.path;
+    const name = filePath.slice(filePath.lastIndexOf('/') + 1);
+
+    const meta = [el('span', { class: 'sha', text: commit.shortHash })];
+    if (preview && preview.kind === 'text') {
+      meta.push(el('span', { class: 'sep' }));
+      meta.push(el('span', { text: `${preview.lines || 0} line${preview.lines === 1 ? '' : 's'}` }));
+      if (preview.bytes) {
+        meta.push(el('span', { class: 'sep' }));
+        meta.push(el('span', { text: formatBytes(preview.bytes) }));
+      }
+    }
+    if (preview && preview.truncated) {
+      meta.push(el('span', { class: 'sep' }));
+      meta.push(el('span', { class: 'preview-flag', text: 'truncated', title: 'Only the first part of the file is shown.' }));
+    }
+    if (preview && preview.fromParent) {
+      meta.push(el('span', { class: 'sep' }));
+      meta.push(
+        el('span', {
+          class: 'preview-flag',
+          text: 'before deletion',
+          title: 'This commit deleted the file, so its parent version is shown.'
+        })
+      );
+    }
+
+    return el('div', { class: 'preview-title' }, [
+      el('div', { class: 'preview-name', text: name, title: filePath }),
+      el('div', { class: 'preview-meta' }, meta)
+    ]);
+  }
+
+  /** @param {Commit} commit */
+  function renderPreviewActions(commit) {
+    return el('div', { class: 'preview-actions' }, [
+      el(
+        'button',
+        {
+          class: 'icon-button',
+          type: 'button',
+          title: 'Wrap long lines',
+          'aria-label': 'Wrap long lines',
+          'aria-pressed': String(state.previewWrap),
+          onclick: () => {
+            state.previewWrap = !state.previewWrap;
+            saveState();
+            renderPreview();
+          }
+        },
+        [icon('wrap')]
+      ),
+      el(
+        'button',
+        {
+          class: 'icon-button',
+          type: 'button',
+          title: 'Open the diff for this commit',
+          'aria-label': 'Open the diff for this commit',
+          onclick: () => send({ type: 'openDiff', hash: commit.hash })
+        },
+        [icon('diff')]
+      ),
+      el(
+        'button',
+        {
+          class: 'icon-button',
+          type: 'button',
+          title: 'Open this version in an editor',
+          'aria-label': 'Open this version in an editor',
+          onclick: () => send({ type: 'openFile', hash: commit.hash })
+        },
+        [icon('open')]
+      ),
+      el(
+        'button',
+        {
+          class: 'icon-button',
+          type: 'button',
+          title: 'Hide the preview',
+          'aria-label': 'Hide the preview',
+          onclick: () => togglePreview(false)
+        },
+        [icon('close')]
+      )
+    ]);
+  }
+
+  /** @param {Preview} preview */
+  function renderPreviewContent(preview) {
+    if (preview.kind !== 'text') {
+      return el('div', { class: 'state' }, [
+        icon(preview.kind === 'error' ? 'warn' : 'file', 30),
+        el('h2', {
+          text:
+            preview.kind === 'binary'
+              ? 'Binary file'
+              : preview.kind === 'missing'
+                ? 'Nothing to show'
+                : 'Could not read this version'
+        }),
+        el('p', { text: preview.message || '' })
+      ]);
+    }
+
+    const text = preview.content || '';
+    if (!text) {
+      return el('div', { class: 'state' }, [
+        icon('empty', 30),
+        el('h2', { text: 'Empty file' }),
+        el('p', { text: 'The file exists at this commit but has no contents.' })
+      ]);
+    }
+
+    const lines = text.split('\n');
+    const code = el('div', { class: state.previewWrap ? 'code wrap' : 'code' });
+    const gutterWidth = String(lines.length).length;
+    const fragment = document.createDocumentFragment();
+    for (let i = 0; i < lines.length; i++) {
+      fragment.appendChild(
+        el('div', { class: 'code-line' }, [
+          el('span', { class: 'ln', text: String(i + 1), style: `width:${gutterWidth}ch`, 'aria-hidden': 'true' }),
+          // A trailing space keeps empty lines selectable and the same height.
+          el('span', { class: 'lc', text: lines[i] || ' ' })
+        ])
+      );
+    }
+    code.appendChild(fragment);
+
+    if (preview.truncated) {
+      code.appendChild(
+        el('div', { class: 'preview-cut' }, [
+          el('span', { text: `Preview stops after ${lines.length} lines.` }),
+          action('Open the full file', 'open', () => send({ type: 'openFile', hash: preview.hash }))
+        ])
+      );
+    }
+    return code;
+  }
+
+  function renderPreviewSkeleton() {
+    const wrapper = el('div', { class: 'preview-skeleton', 'aria-hidden': 'true' });
+    for (let i = 0; i < 14; i++) {
+      wrapper.appendChild(el('div', { class: 'bar', style: `width:${20 + ((i * 17) % 65)}%` }));
+    }
+    return wrapper;
+  }
+
+  /**
+   * Asks for the file at `hash`. Debounced because holding an arrow key walks
+   * the list faster than git can answer, and every request spawns a process.
+   */
+  let previewTimer = 0;
+  function requestPreview(hash) {
+    clearTimeout(previewTimer);
+    if (!state.previewOpen || !hash) {
+      return;
+    }
+    if (state.previewHash === hash && state.preview && state.preview.hash === hash) {
+      renderPreview();
+      return;
+    }
+    state.previewHash = hash;
+    state.preview = null;
+    state.previewLoading = true;
+    renderPreview();
+    previewTimer = setTimeout(() => send({ type: 'preview', hash }), 120);
+  }
+
+  /** @param {boolean} [force] */
+  function togglePreview(force) {
+    state.previewOpen = force === undefined ? !state.previewOpen : force;
+    saveState();
+    if (state.previewOpen) {
+      requestPreview(state.selected);
+    } else {
+      clearTimeout(previewTimer);
+    }
+    renderPreview();
+  }
+
+  function setPreviewSize(size) {
+    const total = isNarrow() ? body.clientHeight : body.clientWidth;
+    // Before the first layout there is nothing to clamp against; keeping the
+    // requested size stops a restored width from collapsing to the minimum.
+    if (total <= 0) {
+      state.previewSize = Math.round(Math.max(180, size));
+      applyPreviewLayout();
+      return;
+    }
+    const max = Math.max(180, total - 260);
+    state.previewSize = Math.round(Math.min(max, Math.max(180, size)));
+    applyPreviewLayout();
+  }
+
   function action(label, iconName, handler, primary) {
     return el(
       'button',
@@ -638,6 +958,8 @@
         el('span', { text: ' diff · ' }),
         el('kbd', { text: 'Space' }),
         el('span', { text: ' details · ' }),
+        el('kbd', { text: 'P' }),
+        el('span', { text: ' preview · ' }),
         el('kbd', { text: '/' }),
         el('span', { text: ' search' })
       ])
@@ -718,6 +1040,7 @@
     if (commit) {
       liveRegion.textContent = `${commit.subject}, ${commit.authorName}, ${formatRelative(commit.authorDate)}`;
     }
+    requestPreview(hash);
   }
 
   function toggleDetail(hash) {
@@ -929,8 +1252,81 @@
     } else if (!typing && event.key === 'F5') {
       event.preventDefault();
       refresh();
+    } else if (!typing && (event.key === 'p' || event.key === 'P')) {
+      event.preventDefault();
+      togglePreview();
     }
   });
+
+  // ------------------------------------------------------------ splitter --
+
+  let dragging = false;
+
+  splitter.addEventListener('pointerdown', (event) => {
+    event.preventDefault();
+    dragging = true;
+    body.classList.add('is-dragging');
+    if (splitter.setPointerCapture) {
+      splitter.setPointerCapture(event.pointerId);
+    }
+  });
+
+  splitter.addEventListener('pointermove', (event) => {
+    if (!dragging) {
+      return;
+    }
+    const rect = body.getBoundingClientRect();
+    setPreviewSize(isNarrow() ? rect.bottom - event.clientY : rect.right - event.clientX);
+  });
+
+  const endDrag = () => {
+    if (!dragging) {
+      return;
+    }
+    dragging = false;
+    body.classList.remove('is-dragging');
+    saveState();
+  };
+  splitter.addEventListener('pointerup', endDrag);
+  splitter.addEventListener('pointercancel', endDrag);
+
+  splitter.addEventListener('keydown', (event) => {
+    const step = event.shiftKey ? 64 : 16;
+    const grow = isNarrow() ? 'ArrowUp' : 'ArrowLeft';
+    const shrink = isNarrow() ? 'ArrowDown' : 'ArrowRight';
+    if (event.key === grow) {
+      event.preventDefault();
+      setPreviewSize(state.previewSize + step);
+      saveState();
+    } else if (event.key === shrink) {
+      event.preventDefault();
+      setPreviewSize(state.previewSize - step);
+      saveState();
+    }
+  });
+
+  // Below this width the list and the preview would both be unreadable, so the
+  // preview moves under the list instead of beside it.
+  const NARROW_WIDTH = 720;
+  function applyOrientation(width) {
+    const narrow = width > 0 && width < NARROW_WIDTH;
+    if (narrow === body.classList.contains('is-narrow')) {
+      return;
+    }
+    body.classList.toggle('is-narrow', narrow);
+    splitter.setAttribute('aria-orientation', narrow ? 'horizontal' : 'vertical');
+    setPreviewSize(state.previewSize);
+  }
+
+  if (typeof ResizeObserver !== 'undefined') {
+    new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        applyOrientation(entry.contentRect.width);
+      }
+    }).observe(body);
+  } else {
+    window.addEventListener('resize', () => applyOrientation(body.clientWidth));
+  }
 
   fileNameEl.addEventListener('click', () => send({ type: 'openCurrentFile' }));
   fileNameEl.addEventListener('keydown', (event) => {
@@ -946,7 +1342,7 @@
       case 'context':
         state.file = message.file;
         state.followRenames = message.followRenames;
-        vscode.setState({ uri: message.file.uri });
+        saveState();
         renderHeader();
         return;
       case 'reset':
@@ -955,8 +1351,13 @@
         state.selected = null;
         state.expanded = null;
         state.loadingMore = false;
+        state.previewHash = null;
+        state.preview = null;
+        state.previewLoading = false;
+        clearTimeout(previewTimer);
         rowsByHash.clear();
         renderList();
+        renderPreview();
         return;
       case 'commits': {
         state.loadingMore = false;
@@ -970,8 +1371,22 @@
         }
         renderHeader();
         renderChips();
+        // With nothing selected yet, show the newest version so the pane is
+        // useful the moment the history lands.
+        if (!state.previewHash && state.commits.length) {
+          requestPreview(state.commits[0].hash);
+        }
         return;
       }
+      case 'preview':
+        // A slower answer for a commit the user has already moved past is dropped.
+        if (message.preview.hash !== state.previewHash) {
+          return;
+        }
+        state.preview = message.preview;
+        state.previewLoading = false;
+        renderPreview();
+        return;
       case 'state':
         state.loadState = message.state;
         state.errorMessage = message.message || '';
@@ -991,5 +1406,7 @@
 
   renderHeader();
   renderList();
+  applyOrientation(body.clientWidth);
+  renderPreview();
   send({ type: 'ready' });
 })();
