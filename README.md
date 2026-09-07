@@ -4,7 +4,7 @@
 
 A fast, focused view of a single file's Git history, built to feel like part of VS Code rather than a Git client bolted onto it.
 
-> **[ screenshot placeholder ]** `images/screenshot-history.png` - the history view: timeline, ref badges, stats and an expanded commit.
+![The Git File History view: the commit timeline for a file, an expanded commit with its actions, and the file preview pane beside it.](https://raw.githubusercontent.com/msynk/git-file-history/main/images/screenshot.png)
 
 ---
 
@@ -31,8 +31,6 @@ This extension does one thing well. Open a file, press one button, read its stor
 1. Open any file that lives in a Git repository.
 2. Click the **history icon** in the editor title bar - or right-click the file in the Explorer and choose **Git History** - or run **Git History: Show File History** from the Command Palette.
 3. The view opens with the newest commits first.
-
-> **[ screenshot placeholder ]** `images/screenshot-menu.png` - the editor title bar button and the Explorer context menu entry.
 
 ### In the view
 
@@ -62,8 +60,6 @@ Selecting a commit also reveals its full message and these actions:
 - **Compare with working tree** - that revision against what is on disk now.
 - **Copy SHA** / **Copy message**.
 - **Open on remote** - the commit on GitHub, GitLab, Bitbucket or Azure DevOps, when the repository has such a remote.
-
-> **[ GIF placeholder ]** `images/demo.gif` - selecting a commit, opening its diff, then paging into older history.
 
 ## Settings
 

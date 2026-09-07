@@ -1,8 +1,8 @@
 {
-  "name": "git-file-history",
+  "name": "git-file-history-view",
   "displayName": "Git File History",
   "description": "One action, clear file history. A fast, beautiful Git history view for any file.",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "publisher": "msynk",
   "license": "MIT",
   "engines": {
@@ -168,7 +168,8 @@
     "test:integration": "vscode-test",
     "test": "npm run pretest && npm run test:unit",
     "demo": "node demo/setup.js",
-    "icon": "node scripts/make-icon.js"
+    "icon": "node scripts/make-icon.js",
+    "demo:gif": "node scripts/make-demo-gif.js"
   },
   "devDependencies": {
     "@types/jsdom": "^21.1.7",

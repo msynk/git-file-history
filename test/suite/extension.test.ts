@@ -10,7 +10,7 @@ describe('Git File History extension', () => {
   before(async () => {
     // Activation is lazy - nothing is registered until a command runs or a
     // history panel is restored - so the tests ask for it explicitly.
-    const extension = vscode.extensions.getExtension('msynk.git-file-history');
+    const extension = vscode.extensions.getExtension('msynk.git-file-history-view');
     assert.ok(extension, 'the extension should be installed in the test host');
     await extension!.activate();
   });

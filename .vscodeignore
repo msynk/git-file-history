@@ -6,7 +6,7 @@ test/**
 src/**
 demo/**
 scripts/**
-images/screenshot-*
+images/screenshot*
 images/demo.gif
 node_modules/**
 .gitignore
