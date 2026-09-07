@@ -1,4 +1,4 @@
-# Git File History
+# Git File History View
 
 **One action → clear file history.**
 

@@ -1,6 +1,6 @@
 {
   "name": "git-file-history-view",
-  "displayName": "Git File History",
+  "displayName": "Git File History View",
   "description": "One action, clear file history. A fast, beautiful Git history view for any file.",
   "version": "1.1.0",
   "publisher": "msynk",
@@ -115,7 +115,7 @@
       }
     ],
     "configuration": {
-      "title": "Git File History",
+      "title": "Git File History View",
       "properties": {
         "gitFileHistory.pageSize": {
           "type": "number",
