@@ -6,11 +6,12 @@ import {
   findRepositoryRoot,
   isTracked,
   loadHistoryPage,
+  readCommitDetail,
   readCurrentBranch,
   readFileAtCommit,
   readRemoteUrl
 } from './history';
-import type { HistoryPage, HistoryQuery } from './types';
+import type { CommitDetail, HistoryPage, HistoryQuery } from './types';
 import { comparablePath, isSameOrInside, toRelativePosixPath } from '../util/paths';
 
 /** Bounds the memory the directory-to-root cache can use. */
@@ -96,6 +97,16 @@ export class GitService implements vscode.Disposable {
   /** Loads one page of history for a file. */
   getHistory(query: HistoryQuery, token?: vscode.CancellationToken): Promise<HistoryPage> {
     return loadHistoryPage(this.executor, query, token);
+  }
+
+  /** Loads one commit in full, including every file it touched. */
+  getCommitDetail(
+    root: string,
+    hash: string,
+    limit: number,
+    token?: vscode.CancellationToken
+  ): Promise<CommitDetail | undefined> {
+    return readCommitDetail(this.executor, root, hash, limit, token);
   }
 
   /**

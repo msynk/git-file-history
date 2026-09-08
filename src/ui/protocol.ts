@@ -1,4 +1,4 @@
-import type { CommitEntry, FileChangeStatus } from '../git/types';
+import type { CommitDetail, CommitEntry, FileChangeStatus } from '../git/types';
 
 /** Everything the webview needs to render its header. */
 export interface FileContext {
@@ -46,6 +46,15 @@ export interface PreviewResult {
   message?: string;
 }
 
+/** Every file one commit touched, or why they could not be listed. */
+export interface CommitDetailResult {
+  hash: string;
+  /** Absent when git could not report the commit. */
+  detail?: CommitDetail;
+  /** Explanation shown in place of the file list. */
+  error?: string;
+}
+
 /** Messages sent from the extension to the webview. */
 export type ToWebview =
   | { type: 'context'; file: FileContext; followRenames: boolean }
@@ -53,6 +62,7 @@ export type ToWebview =
   | { type: 'commits'; commits: CommitEntry[]; hasMore: boolean; append: boolean; token: number }
   | { type: 'stale'; stale: boolean }
   | { type: 'preview'; preview: PreviewResult }
+  | { type: 'commitDetail'; result: CommitDetailResult }
   | { type: 'reset' };
 
 /** Messages sent from the webview to the extension. */
@@ -65,6 +75,12 @@ export type FromWebview =
   | { type: 'openDiff'; hash: string }
   | { type: 'openFile'; hash: string }
   | { type: 'compareWithWorkingTree'; hash: string }
+  /** Diff the file between two arbitrary commits from the list. */
+  | { type: 'compareCommits'; base: string; target: string }
+  /** List every file the commit touched, not just the one on screen. */
+  | { type: 'commitDetail'; hash: string }
+  /** Diff one of those files against the state it had in the parent commit. */
+  | { type: 'openCommitFileDiff'; hash: string; path: string; previousPath?: string; status: FileChangeStatus }
   | { type: 'copySha'; hash: string }
   | { type: 'copyMessage'; hash: string }
   | { type: 'openRemote'; hash: string }

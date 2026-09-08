@@ -14,6 +14,12 @@
 
   /** @typedef {{hash:string,path:string,status:string,kind:'text'|'binary'|'missing'|'error',content?:string,lines?:number,bytes?:number,truncated?:boolean,fromParent?:boolean,message?:string}} Preview */
 
+  /** @typedef {{path:string,previousPath?:string,status:string,insertions?:number,deletions?:number}} CommitFile */
+
+  /** @typedef {{files:CommitFile[],fileCount:number,truncated?:boolean}} CommitDetail */
+
+  /** @typedef {{hash:string,detail?:CommitDetail,error?:string}} CommitDetailResult */
+
   const state = {
     /** @type {{uri:string,fileName:string,relativePath:string,repositoryName:string,branch?:string,hasRemote:boolean}|null} */
     file: null,
@@ -34,6 +40,11 @@
     selected: null,
     /** @type {string|null} */
     expanded: null,
+    /** Commit whose full file list is open inside its detail pane. */
+    commitFilesHash: /** @type {string|null} */ (null),
+    commitFilesLoading: false,
+    /** Commit marked as the left side of a two-commit comparison. */
+    compareBase: /** @type {string|null} */ (null),
     stale: false,
     loadingMore: false,
     /** Whether the side-by-side file preview is showing. */
@@ -49,10 +60,17 @@
     previewLoading: false
   };
 
+  /**
+   * File lists already fetched, keyed by commit. A commit is immutable, so an
+   * answer never goes stale and reopening the list costs nothing.
+   * @type {Map<string, CommitDetailResult>}
+   */
+  const commitFilesCache = new Map();
+
   const useGravatars = document.body.dataset.gravatars === 'true';
   const openDiffOnSelect = document.body.dataset.openDiffOnSelect === 'true';
 
-  // The panel is rebuilt from scratch every time it is revealed, so the layout
+  // The panel is rebuilt from scratch after a window reload, so the layout
   // choices the user made are restored from the webview's persisted state; the
   // setting only provides the starting point.
   const persisted = vscode.getState() || {};
@@ -80,6 +98,7 @@
     branch: 'M5 3.5v9M5 3.5a1.5 1.5 0 1 0 0-.001ZM5 12.5a1.5 1.5 0 1 0 0-.001ZM11 5.5a1.5 1.5 0 1 0 0-.001ZM11 7v.5A2.5 2.5 0 0 1 8.5 10H7',
     file: 'M9 1.5H4.5A1.5 1.5 0 0 0 3 3v10A1.5 1.5 0 0 0 4.5 14.5h7A1.5 1.5 0 0 0 13 13V5.5L9 1.5ZM9 1.5V5.5H13',
     diff: 'M4.5 2v11M2.5 4h4M2.5 11h4M11.5 3v10M9.5 6h4',
+    compare: 'M2.5 5.5h9M9 3l2.5 2.5L9 8M13.5 10.5h-9M7 8l-2.5 2.5L7 13',
     copy: 'M5.5 5.5h7a1 1 0 0 1 1 1v7a1 1 0 0 1-1 1h-7a1 1 0 0 1-1-1v-7a1 1 0 0 1 1-1ZM10.5 3.5v-1a1 1 0 0 0-1-1h-7a1 1 0 0 0-1 1v7a1 1 0 0 0 1 1h1',
     external: 'M9 2.5h4.5V7M13.5 2.5 7 9M11.5 9.5V13a.5.5 0 0 1-.5.5H3a.5.5 0 0 1-.5-.5V5.5A.5.5 0 0 1 3 5h3.5',
     open: 'M2 12.5V4a1 1 0 0 1 1-1h3l1.5 2H13a1 1 0 0 1 1 1v6.5a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1Z',
@@ -88,7 +107,8 @@
     warn: 'M8 2.5 15 14H1L8 2.5ZM8 6.5v4M8 12.2v.6',
     preview: 'M2.5 3h11a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1ZM9.5 3v10',
     wrap: 'M2.5 4h11M2.5 8h8a2.5 2.5 0 0 1 0 5H6M8 11l-2 2 2 2M2.5 12.5h2',
-    empty: 'M3 4.5h10M3 8h10M3 11.5h6'
+    empty: 'M3 4.5h10M3 8h10M3 11.5h6',
+    commit: 'M1.5 8h3.5M11 8h3.5M8 10.8a2.8 2.8 0 1 0 0-5.6 2.8 2.8 0 0 0 0 5.6Z'
   };
 
   /**
@@ -391,6 +411,24 @@
 
   function renderChips() {
     chipRow.textContent = '';
+    if (state.compareBase) {
+      const base = findCommit(state.compareBase);
+      chipRow.appendChild(
+        el('span', { class: 'chip' }, [
+          el('span', { text: `Compare base: ${base ? base.shortHash : state.compareBase.slice(0, 7)}` }),
+          el(
+            'button',
+            {
+              type: 'button',
+              title: 'Clear compare base',
+              'aria-label': 'Clear compare base',
+              onclick: () => setCompareBase(null)
+            },
+            [icon('close', 11)]
+          )
+        ])
+      );
+    }
     if (state.deepSearch) {
       chipRow.appendChild(
         el('span', { class: 'chip' }, [
@@ -422,7 +460,7 @@
       id: `commit-${commit.hash}`,
       'aria-selected': String(state.selected === commit.hash),
       'aria-expanded': String(state.expanded === commit.hash),
-      dataset: { hash: commit.hash, status: commit.status }
+      dataset: { hash: commit.hash, status: commit.status, compareBase: String(state.compareBase === commit.hash) }
     });
 
     const refs = commit.refs.length
@@ -444,6 +482,13 @@
 
     const subjectRow = el('div', { class: 'commit-subject-row' }, [
       el('span', { class: 'commit-subject', text: commit.subject || '(no commit message)', title: commit.subject }),
+      state.compareBase === commit.hash
+        ? el('span', {
+            class: 'compare-tag',
+            text: 'compare base',
+            title: 'Marked for comparison - pick another commit and press Ctrl+Enter to diff the two'
+          })
+        : null,
       refs,
       stats
     ]);
@@ -479,7 +524,28 @@
                 ? `Renamed from ${commit.previousPath}`
                 : STATUS_LABEL[commit.status]
           })
-        : null
+        : null,
+      // The list only ever shows one file, so this is the way to the rest of
+      // what the commit touched.
+      el(
+        'button',
+        {
+          class: 'row-action',
+          type: 'button',
+          // Out of the tab order: with a page of commits loaded, tabbing past
+          // the list would mean tabbing through every row. F reaches it instead.
+          tabindex: '-1',
+          title: 'Show every file this commit changed (F)',
+          'aria-label': 'Show every file this commit changed',
+          'aria-keyshortcuts': 'F',
+          'aria-pressed': String(state.commitFilesHash === commit.hash),
+          onclick: (/** @type {Event} */ event) => {
+            event.stopPropagation();
+            toggleCommitFiles(commit.hash);
+          }
+        },
+        [icon('commit', 14)]
+      )
     ]);
 
     row.append(
@@ -495,7 +561,11 @@
     return row;
   }
 
-  /** @param {Commit} commit */
+  /**
+   * The line counts of one change: a commit's own, one file inside a commit, or
+   * a total across several.
+   * @param {{insertions?:number,deletions?:number}} commit
+   */
   function renderStats(commit) {
     if (commit.insertions === undefined && commit.deletions === undefined) {
       return el('span', { class: 'stats', text: 'binary', title: 'Binary file' });
@@ -535,8 +605,16 @@
       definitions.push(el('dt', { text: 'Merge' }), el('dd', { text: `${commit.parents.length} parents` }));
     }
 
+    const base = state.compareBase && state.compareBase !== commit.hash ? findCommit(state.compareBase) : null;
+
     const actions = [
       action('Open diff', 'diff', () => send({ type: 'openDiff', hash: commit.hash }), true),
+      base ? action(`Compare with ${base.shortHash}`, 'compare', () => compareWithBase(commit.hash), true) : null,
+      action(
+        state.compareBase === commit.hash ? 'Clear compare base' : 'Select for compare',
+        'compare',
+        () => toggleCompareBase(commit.hash)
+      ),
       action('Open file at this commit', 'open', () => send({ type: 'openFile', hash: commit.hash })),
       action('Compare with working tree', 'file', () => send({ type: 'compareWithWorkingTree', hash: commit.hash })),
       action('Copy SHA', 'copy', () => send({ type: 'copySha', hash: commit.hash })),
@@ -549,8 +627,107 @@
     return el('div', { class: 'detail', onclick: (/** @type {Event} */ event) => event.stopPropagation() }, [
       el('dl', {}, definitions),
       commit.body ? el('div', { class: 'detail-body', text: commit.body }) : null,
-      el('div', { class: 'actions' }, actions)
+      el('div', { class: 'actions' }, actions),
+      state.commitFilesHash === commit.hash ? renderCommitFiles(commit) : null
     ]);
+  }
+
+  const STATUS_LETTER = { added: 'A', modified: 'M', deleted: 'D', renamed: 'R' };
+
+  /**
+   * Every file the commit touched. The history rows only ever show the one file
+   * being followed, so this is the whole change in context.
+   * @param {Commit} commit
+   */
+  function renderCommitFiles(commit) {
+    if (state.commitFilesLoading) {
+      return el('div', { class: 'commit-files' }, [el('p', { class: 'commit-files-note', text: 'Reading the commit…' })]);
+    }
+
+    const result = commitFilesCache.get(commit.hash);
+    if (!result || !result.detail) {
+      return el('div', { class: 'commit-files' }, [
+        el('p', { class: 'commit-files-note', text: (result && result.error) || 'The commit could not be read.' })
+      ]);
+    }
+
+    const files = result.detail.files;
+    if (!files.length) {
+      return el('div', { class: 'commit-files' }, [
+        el('p', { class: 'commit-files-note', text: 'This commit changed no files.' })
+      ]);
+    }
+
+    const total = result.detail.fileCount;
+    return el('div', { class: 'commit-files' }, [
+      el('div', { class: 'commit-files-head' }, [
+        el('span', { text: `${total} file${total === 1 ? '' : 's'} changed in this commit` }),
+        renderStats(sumStats(files))
+      ]),
+      el('div', { class: 'file-list' }, files.map((file) => renderCommitFile(commit, file))),
+      result.detail.truncated
+        ? el('p', {
+            class: 'commit-files-note',
+            text: `Only the first ${files.length} of ${total} files are listed.`
+          })
+        : null
+    ]);
+  }
+
+  /**
+   * @param {Commit} commit
+   * @param {CommitFile} file
+   */
+  function renderCommitFile(commit, file) {
+    return el(
+      'button',
+      {
+        class: file.path === commit.path ? 'file-entry is-current' : 'file-entry',
+        type: 'button',
+        title: file.previousPath ? `${file.previousPath} -> ${file.path}` : file.path,
+        onclick: () =>
+          send({
+            type: 'openCommitFileDiff',
+            hash: commit.hash,
+            path: file.path,
+            previousPath: file.previousPath,
+            status: file.status
+          })
+      },
+      [
+        el('span', {
+          class: 'file-status',
+          dataset: { status: file.status },
+          text: STATUS_LETTER[file.status] || '?',
+          'aria-label': STATUS_LABEL[file.status] || file.status
+        }),
+        el('span', { class: 'file-path' }, splitPath(file.path)),
+        renderStats(file)
+      ]
+    );
+  }
+
+  /** Totals across a commit's files, in the shape {@link renderStats} expects. */
+  function sumStats(files) {
+    let insertions = 0;
+    let deletions = 0;
+    for (const file of files) {
+      insertions += file.insertions || 0;
+      deletions += file.deletions || 0;
+    }
+    return { insertions, deletions };
+  }
+
+  /** Splits a path so the directory can be dimmed and the file name stand out. */
+  function splitPath(value) {
+    const cut = value.lastIndexOf('/');
+    if (cut === -1) {
+      return [el('span', { class: 'path-name', text: value })];
+    }
+    return [
+      el('span', { class: 'path-dir', text: value.slice(0, cut + 1) }),
+      el('span', { class: 'path-name', text: value.slice(cut + 1) })
+    ];
   }
 
   // ------------------------------------------------------ preview pane --
@@ -958,6 +1135,12 @@
         el('span', { text: ' diff · ' }),
         el('kbd', { text: 'Space' }),
         el('span', { text: ' details · ' }),
+        el('kbd', { text: 'F' }),
+        el('span', { text: ' files in commit · ' }),
+        el('kbd', { text: 'C' }),
+        el('span', { text: state.compareBase ? ' re-mark · ' : ' mark for compare · ' }),
+        state.compareBase ? el('kbd', { text: 'Ctrl+Enter' }) : null,
+        state.compareBase ? el('span', { text: ' compare · ' }) : null,
         el('kbd', { text: 'P' }),
         el('span', { text: ' preview · ' }),
         el('kbd', { text: '/' }),
@@ -1045,6 +1228,12 @@
 
   function toggleDetail(hash) {
     state.expanded = state.expanded === hash ? null : hash;
+    // The commit's file list lives inside the detail pane, so it closes with it.
+    const closedFiles = state.commitFilesHash === state.expanded ? null : state.commitFilesHash;
+    if (closedFiles) {
+      state.commitFilesHash = null;
+      state.commitFilesLoading = false;
+    }
     for (const [key, row] of rowsByHash) {
       const detail = row.querySelector('.detail');
       if (key === state.expanded) {
@@ -1062,10 +1251,96 @@
         row.setAttribute('aria-expanded', 'false');
       }
     }
+    // Its row-action button has to stop looking pressed along with it.
+    if (closedFiles) {
+      refreshRow(closedFiles);
+    }
     const row = rowsByHash.get(hash);
     if (row && state.expanded === hash) {
       row.scrollIntoView({ block: 'nearest' });
     }
+  }
+
+  /**
+   * Opens, or closes, the list of every file a commit touched. The list is only
+   * fetched once: a commit never changes.
+   */
+  function toggleCommitFiles(hash) {
+    if (state.commitFilesHash === hash) {
+      state.commitFilesHash = null;
+      state.commitFilesLoading = false;
+      refreshRow(hash);
+      return;
+    }
+
+    select(hash, { scroll: false });
+    if (state.expanded !== hash) {
+      // Expanding first, so the clean-up in toggleDetail cannot undo the state
+      // this sets up next.
+      toggleDetail(hash);
+    }
+    state.commitFilesHash = hash;
+    state.commitFilesLoading = !commitFilesCache.has(hash);
+    refreshRow(hash);
+    if (state.commitFilesLoading) {
+      send({ type: 'commitDetail', hash });
+    }
+  }
+
+  // -------------------------------------------------------------- compare --
+
+  /** @param {string} hash @returns {Commit|undefined} */
+  function findCommit(hash) {
+    return state.commits.find((commit) => commit.hash === hash);
+  }
+
+  /** Rebuilds one row in place, so marking a base does not disturb the scroll. */
+  function refreshRow(hash) {
+    const row = rowsByHash.get(hash);
+    const commit = findCommit(hash);
+    if (!row || !commit || !row.parentNode) {
+      return;
+    }
+    const replacement = renderRow(commit);
+    if (row.classList.contains('is-last')) {
+      replacement.classList.add('is-last');
+    }
+    // Clicking a row focuses it, and clicking one of its buttons focuses that.
+    // Dropping the old node would send the focus to the body, which drops the
+    // list's active-selection colour and stops the keyboard reaching the row.
+    const hadFocus = row.contains(document.activeElement);
+    row.replaceWith(replacement);
+    if (hadFocus) {
+      replacement.focus({ preventScroll: true });
+    }
+  }
+
+  /** @param {string|null} hash */
+  function setCompareBase(hash) {
+    const previous = state.compareBase;
+    if (previous === hash) {
+      return;
+    }
+    state.compareBase = hash;
+    for (const key of [previous, hash]) {
+      if (key) {
+        refreshRow(key);
+      }
+    }
+    renderChips();
+    renderFooter();
+  }
+
+  function toggleCompareBase(hash) {
+    setCompareBase(state.compareBase === hash ? null : hash);
+  }
+
+  /** Diffs `hash` against the marked base. The extension orders the two sides. */
+  function compareWithBase(hash) {
+    if (!state.compareBase || state.compareBase === hash) {
+      return;
+    }
+    send({ type: 'compareCommits', base: state.compareBase, target: hash });
   }
 
   function move(delta) {
@@ -1182,6 +1457,11 @@
       return;
     }
     const hash = row.dataset.hash;
+    if (event.altKey) {
+      // Alt-click marks the comparison base without disturbing the selection.
+      toggleCompareBase(hash);
+      return;
+    }
     select(hash, { scroll: false });
     if (state.expanded !== hash) {
       toggleDetail(hash);
@@ -1227,7 +1507,26 @@
       case 'Enter':
         if (state.selected) {
           event.preventDefault();
-          send({ type: 'openDiff', hash: state.selected });
+          if ((event.ctrlKey || event.metaKey) && state.compareBase && state.compareBase !== state.selected) {
+            compareWithBase(state.selected);
+          } else {
+            send({ type: 'openDiff', hash: state.selected });
+          }
+        }
+        return;
+      case 'c':
+      case 'C':
+        if (state.selected && !event.ctrlKey && !event.metaKey && !event.altKey) {
+          event.preventDefault();
+          toggleCompareBase(state.selected);
+        }
+        return;
+      case 'f':
+      case 'F':
+        // Ctrl+F belongs to the search box, which the document handler owns.
+        if (state.selected && !event.ctrlKey && !event.metaKey && !event.altKey) {
+          event.preventDefault();
+          toggleCommitFiles(state.selected);
         }
         return;
       case ' ':
@@ -1350,12 +1649,17 @@
         state.hasMore = false;
         state.selected = null;
         state.expanded = null;
+        state.compareBase = null;
         state.loadingMore = false;
+        state.commitFilesHash = null;
+        state.commitFilesLoading = false;
+        commitFilesCache.clear();
         state.previewHash = null;
         state.preview = null;
         state.previewLoading = false;
         clearTimeout(previewTimer);
         rowsByHash.clear();
+        renderChips();
         renderList();
         renderPreview();
         return;
@@ -1367,6 +1671,11 @@
           appendCommits(message.commits);
         } else {
           state.commits = message.commits;
+          // A reload can drop the marked commit - for example when a search
+          // narrows the list - and a base that is gone cannot be compared.
+          if (state.compareBase && !findCommit(state.compareBase)) {
+            state.compareBase = null;
+          }
           renderList();
         }
         renderHeader();
@@ -1386,6 +1695,15 @@
         state.preview = message.preview;
         state.previewLoading = false;
         renderPreview();
+        return;
+      case 'commitDetail':
+        commitFilesCache.set(message.result.hash, message.result);
+        // A list the user has already closed, or moved past, is only cached.
+        if (state.commitFilesHash !== message.result.hash) {
+          return;
+        }
+        state.commitFilesLoading = false;
+        refreshRow(message.result.hash);
         return;
       case 'state':
         state.loadState = message.state;

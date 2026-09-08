@@ -3,9 +3,16 @@ import * as vscode from 'vscode';
 import { toHistoryUri } from '../git/contentProvider';
 import { GitCancelledError, GitError } from '../git/gitExecutor';
 import type { GitService, RepositoryContext } from '../git/gitService';
-import type { CommitEntry, HistoryCursor, HistorySearch } from '../git/types';
+import type { CommitEntry, FileChangeStatus, HistoryCursor, HistorySearch } from '../git/types';
 import { buildCommitUrl } from '../util/remoteUrl';
-import type { FileContext, FromWebview, LoadState, PreviewResult, ToWebview } from './protocol';
+import type {
+  CommitDetailResult,
+  FileContext,
+  FromWebview,
+  LoadState,
+  PreviewResult,
+  ToWebview
+} from './protocol';
 
 const VIEW_TYPE = 'gitFileHistory.view';
 
@@ -18,6 +25,16 @@ const PREVIEW_MAX_BYTES = 2_000_000;
 
 /** How many previews are kept. A commit's content is immutable, so they never go stale. */
 const PREVIEW_CACHE_LIMIT = 24;
+
+/**
+ * Most files listed for a single commit. A sweeping refactor or a vendored
+ * import can touch thousands, which no one reads and every one of which costs
+ * a row in the webview.
+ */
+const COMMIT_DETAIL_MAX_FILES = 500;
+
+/** How many commit file lists are kept. Like previews, they never go stale. */
+const COMMIT_DETAIL_CACHE_LIMIT = 24;
 
 interface Target {
   uri: vscode.Uri;
@@ -44,12 +61,17 @@ export class HistoryPanel implements vscode.Disposable {
   /** Guards against a slow preview landing after a newer one. */
   private previewToken = 0;
   private readonly previewCache = new Map<string, PreviewResult>();
+  /** In-flight commit file listing, cancelled when another one is asked for. */
+  private detailLoading: vscode.CancellationTokenSource | undefined;
+  /** Guards against a slow file listing landing after a newer one. */
+  private detailToken = 0;
+  private readonly commitDetailCache = new Map<string, CommitDetailResult>();
   private headWatcher: vscode.FileSystemWatcher | undefined;
   /** Guards against a stale response overwriting a newer one. */
   private loadToken = 0;
   /**
-   * Last context and state posted. A hidden webview is torn down by VS Code, so
-   * its script restarts on reveal and asks for everything again via `ready`;
+   * Last context and state posted. A panel restored after a window reload comes
+   * back with a fresh script, which asks for everything again via `ready`;
    * keeping the last values means the replay is exact.
    */
   private lastContext: FileContext | undefined;
@@ -81,7 +103,10 @@ export class HistoryPanel implements vscode.Disposable {
         { viewColumn: vscode.ViewColumn.Active, preserveFocus: false },
         {
           enableScripts: true,
-          retainContextWhenHidden: false,
+          // The view is a working surface: a selection, an expanded commit, a
+          // scroll position and a search deep into the history are all too much
+          // to lose every time the user reads something in another tab.
+          retainContextWhenHidden: true,
           localResourceRoots: [vscode.Uri.joinPath(extensionUri, 'media')]
         }
       );
@@ -119,6 +144,8 @@ export class HistoryPanel implements vscode.Disposable {
     this.loading?.dispose();
     this.previewLoading?.cancel();
     this.previewLoading?.dispose();
+    this.detailLoading?.cancel();
+    this.detailLoading?.dispose();
     this.headWatcher?.dispose();
     for (const disposable of this.disposables) {
       disposable.dispose();
@@ -182,6 +209,8 @@ export class HistoryPanel implements vscode.Disposable {
     this.loading = undefined;
     this.cancelPreview();
     this.previewCache.clear();
+    this.cancelCommitDetail();
+    this.commitDetailCache.clear();
     this.commits = [];
     this.cursor = undefined;
     this.hasMore = false;
@@ -199,6 +228,8 @@ export class HistoryPanel implements vscode.Disposable {
     this.loading = undefined;
     this.cancelPreview();
     this.previewCache.clear();
+    this.cancelCommitDetail();
+    this.commitDetailCache.clear();
     this.commits = [];
     this.cursor = undefined;
     this.hasMore = false;
@@ -305,6 +336,12 @@ export class HistoryPanel implements vscode.Disposable {
       case 'preview':
         await this.sendPreview(message.hash);
         return;
+      case 'commitDetail':
+        await this.sendCommitDetail(message.hash);
+        return;
+      case 'openCommitFileDiff':
+        await this.openCommitFileDiff(message.hash, message.path, message.previousPath, message.status);
+        return;
       case 'openDiff':
         await this.openDiff(message.hash);
         return;
@@ -313,6 +350,9 @@ export class HistoryPanel implements vscode.Disposable {
         return;
       case 'compareWithWorkingTree':
         await this.compareWithWorkingTree(message.hash);
+        return;
+      case 'compareCommits':
+        await this.compareCommits(message.base, message.target);
         return;
       case 'copySha':
         await this.copy(message.hash, 'Commit SHA copied.');
@@ -336,11 +376,9 @@ export class HistoryPanel implements vscode.Disposable {
     }
   }
 
-  /** Re-sends everything after the webview script restarts. */
   /**
    * Sends the current state in full. Called whenever the webview script starts:
-   * on first load, and again after VS Code tears the hidden webview down and
-   * rebuilds it on reveal.
+   * on first load, and again when a panel is restored after a window reload.
    */
   private replayState(): void {
     if (this.lastContext) {
@@ -451,32 +489,123 @@ export class HistoryPanel implements vscode.Disposable {
     this.previewCache.set(preview.hash, preview);
   }
 
+  /**
+   * Lists every file a commit touched. The history itself is narrowed to one
+   * path, so this is the only thing that can answer "what else changed here".
+   */
+  private async sendCommitDetail(hash: string): Promise<void> {
+    const target = this.target;
+    if (!target) {
+      return;
+    }
+
+    const cached = this.commitDetailCache.get(hash);
+    if (cached) {
+      this.post({ type: 'commitDetail', result: cached });
+      return;
+    }
+
+    this.cancelCommitDetail();
+    const source = new vscode.CancellationTokenSource();
+    this.detailLoading = source;
+    const token = ++this.detailToken;
+
+    try {
+      const detail = await this.git.getCommitDetail(
+        target.repository.root,
+        hash,
+        COMMIT_DETAIL_MAX_FILES,
+        source.token
+      );
+      if (token !== this.detailToken) {
+        return;
+      }
+      this.publishCommitDetail(detail ? { hash, detail } : { hash, error: 'git reported nothing for this commit.' });
+    } catch (error) {
+      if (error instanceof GitCancelledError || token !== this.detailToken) {
+        return;
+      }
+      this.publishCommitDetail({ hash, error: error instanceof GitError ? error.message : String(error) });
+    } finally {
+      if (this.detailLoading === source) {
+        this.detailLoading = undefined;
+      }
+      source.dispose();
+    }
+  }
+
+  private cancelCommitDetail(): void {
+    this.detailLoading?.cancel();
+    this.detailLoading?.dispose();
+    this.detailLoading = undefined;
+    this.detailToken++;
+  }
+
+  private publishCommitDetail(result: CommitDetailResult): void {
+    if (this.commitDetailCache.size >= COMMIT_DETAIL_CACHE_LIMIT) {
+      // FIFO, as for previews: the view walks history in order, so the oldest
+      // entry is the least likely to be asked for again.
+      const oldest = this.commitDetailCache.keys().next();
+      if (!oldest.done) {
+        this.commitDetailCache.delete(oldest.value);
+      }
+    }
+    this.commitDetailCache.set(result.hash, result);
+    this.post({ type: 'commitDetail', result });
+  }
+
   private async openDiff(hash: string): Promise<void> {
     const commit = this.find(hash);
+    if (commit) {
+      await this.diffAgainstParent(commit, commit);
+    }
+  }
+
+  /** Diffs one of the other files a commit touched, as listed by its detail. */
+  private async openCommitFileDiff(
+    hash: string,
+    filePath: string,
+    previousPath: string | undefined,
+    status: FileChangeStatus
+  ): Promise<void> {
+    const commit = this.find(hash);
+    if (commit) {
+      await this.diffAgainstParent(commit, { path: filePath, previousPath, status });
+    }
+  }
+
+  /**
+   * Diffs one path as a commit left it against the state it had in the parent.
+   * Shared by the file being followed and by every other file in the commit.
+   */
+  private async diffAgainstParent(
+    commit: CommitEntry,
+    change: { path: string; previousPath?: string; status: FileChangeStatus }
+  ): Promise<void> {
     const target = this.target;
-    if (!commit || !target) {
+    if (!target) {
       return;
     }
     const root = target.repository.root;
     const parent = commit.parents[0];
-    const previousPath = commit.previousPath ?? commit.path;
+    const previousPath = change.previousPath ?? change.path;
 
     const left =
-      parent && commit.status !== 'added'
+      parent && change.status !== 'added'
         ? toHistoryUri({ root, ref: parent, path: previousPath })
         : toHistoryUri({ root, ref: '', path: previousPath });
     const right =
-      commit.status === 'deleted'
-        ? toHistoryUri({ root, ref: '', path: commit.path })
-        : toHistoryUri({ root, ref: commit.hash, path: commit.path });
+      change.status === 'deleted'
+        ? toHistoryUri({ root, ref: '', path: change.path })
+        : toHistoryUri({ root, ref: commit.hash, path: change.path });
 
-    const name = path.posix.basename(commit.path);
+    const name = path.posix.basename(change.path);
     const title =
-      commit.status === 'added'
+      change.status === 'added'
         ? `${name} (added in ${commit.shortHash})`
-        : commit.status === 'deleted'
+        : change.status === 'deleted'
           ? `${name} (deleted in ${commit.shortHash})`
-          : `${name} (${commit.shortHash} ↔ parent)`;
+          : `${name} (${commit.shortHash} \u2194 parent)`;
 
     await vscode.commands.executeCommand('vscode.diff', left, right, title, { preview: true });
   }
@@ -503,6 +632,52 @@ export class HistoryPanel implements vscode.Disposable {
       left,
       target.uri,
       `${name} (${commit.shortHash} ↔ working tree)`,
+      { preview: true }
+    );
+  }
+
+  /**
+   * Diffs the file between two commits picked in the list. The pair is ordered
+   * by position in the history, so the diff always reads older to newer no
+   * matter which side the user marked first.
+   */
+  private async compareCommits(base: string, target: string): Promise<void> {
+    const current = this.target;
+    if (!current || base === target) {
+      return;
+    }
+    const baseIndex = this.commits.findIndex((commit) => commit.hash === base);
+    const targetIndex = this.commits.findIndex((commit) => commit.hash === target);
+    if (baseIndex === -1 || targetIndex === -1) {
+      return;
+    }
+    // The list is newest-first, so the larger index is the older commit.
+    const [older, newer] =
+      baseIndex > targetIndex
+        ? [this.commits[baseIndex], this.commits[targetIndex]]
+        : [this.commits[targetIndex], this.commits[baseIndex]];
+
+    const root = current.repository.root;
+    // A commit that deleted the file has no content at that revision, so that
+    // side of the diff is empty rather than a failed `git show`.
+    const left = toHistoryUri({
+      root,
+      ref: older.status === 'deleted' ? '' : older.hash,
+      path: older.path
+    });
+    const right = toHistoryUri({
+      root,
+      ref: newer.status === 'deleted' ? '' : newer.hash,
+      path: newer.path
+    });
+
+    const name = path.posix.basename(newer.path);
+    const renamed = older.path !== newer.path ? ` · ${path.posix.basename(older.path)} → ${name}` : '';
+    await vscode.commands.executeCommand(
+      'vscode.diff',
+      left,
+      right,
+      `${name} (${older.shortHash} ↔ ${newer.shortHash})${renamed}`,
       { preview: true }
     );
   }

@@ -4,7 +4,7 @@
 
 A fast, focused view of a single file's Git history, built to feel like part of VS Code rather than a Git client bolted onto it.
 
-![The Git File History view: the commit timeline for a file, an expanded commit with its actions, and the file preview pane beside it.](https://raw.githubusercontent.com/msynk/git-file-history/main/images/screenshot.png)
+![The Git File History view: the commit timeline for a file on the left, and the file preview pane for the selected commit on the right.](https://raw.githubusercontent.com/msynk/git-file-history/main/images/screenshot-2.png)
 
 ---
 
@@ -20,6 +20,7 @@ This extension does one thing well. Open a file, press one button, read its stor
 - **A readable timeline** - commit message, author avatar, relative time (exact date on hover), short SHA, branch and tag badges, change type, and lines added/removed.
 - **Follows renames** - history does not stop at the commit that moved the file, and the rename itself is called out.
 - **Preview beside the timeline** - selecting a commit shows the whole file as it was at that point, with line numbers, in a resizable pane. Toggle it with <kbd>P</kbd>.
+- **The rest of the commit** - a button on every row lists every file that commit touched, so a change is never read out of context. Pick any of them to open its diff.
 - **Diff in one keystroke** - <kbd>Enter</kbd> opens the file's diff for the selected commit in VS Code's own diff editor.
 - **Search two ways** - filter the loaded commits as you type, or press <kbd>Enter</kbd> to search the whole history by commit message (`--grep`) or by *changed content* (`-S`, the pickaxe) to find when a line was introduced.
 - **Incremental loading** - history arrives one page at a time and older commits are fetched as you scroll or arrow down.
@@ -32,6 +33,8 @@ This extension does one thing well. Open a file, press one button, read its stor
 2. Click the **history icon** in the editor title bar - or right-click the file in the Explorer and choose **Git History** - or run **Git History: Show File History** from the Command Palette.
 3. The view opens with the newest commits first.
 
+![The editor context menu with the Git History command.](https://raw.githubusercontent.com/msynk/git-file-history/main/images/screenshot-1.png)
+
 ### In the view
 
 | Action | How |
@@ -39,6 +42,9 @@ This extension does one thing well. Open a file, press one button, read its stor
 | Move between commits | <kbd>↑</kbd> <kbd>↓</kbd>, <kbd>PageUp</kbd> <kbd>PageDown</kbd>, <kbd>Home</kbd> <kbd>End</kbd> |
 | Open the diff for a commit | <kbd>Enter</kbd>, or double-click |
 | Show commit details and actions | <kbd>Space</kbd>, or click |
+| List every file the commit changed | <kbd>F</kbd>, or the button at the end of the row |
+| Mark a commit for comparison | <kbd>C</kbd>, <kbd>Alt</kbd>+click, or **Select for compare** |
+| Compare the marked commit with another | <kbd>Ctrl</kbd>+<kbd>Enter</kbd>, or **Compare with `<sha>`** |
 | Filter loaded commits | Type in the search box |
 | Search the whole history | Type, then <kbd>Enter</kbd> |
 | Search by changed content | Switch the mode to **Content**, type, then <kbd>Enter</kbd> |
@@ -53,13 +59,34 @@ diff or the full version in an editor. Long files are truncated to keep the view
 responsive, and the pane says so. A commit that deleted the file shows the last
 version before the deletion.
 
+![A selected commit expanded in the timeline, with the file preview pane beside it.](https://raw.githubusercontent.com/msynk/git-file-history/main/images/screenshot-3.png)
+
 Selecting a commit also reveals its full message and these actions:
 
 - **Open diff** - the file's change in that commit, against its parent.
+- **Select for compare** - marks the commit as one side of a comparison. Any
+  other commit then offers **Compare with `<sha>`**, which diffs the file
+  between the two - however far apart they are, and across renames. The marked
+  row keeps a `compare base` badge until it is cleared from the chip above the
+  list. The diff always reads older on the left, whichever side was marked first.
 - **Open file at this commit** - the whole file as it was, read-only.
 - **Compare with working tree** - that revision against what is on disk now.
 - **Copy SHA** / **Copy message**.
 - **Open on remote** - the commit on GitHub, GitLab, Bitbucket or Azure DevOps, when the repository has such a remote.
+
+![An expanded commit showing its SHA, author, committer, path and action buttons.](https://raw.githubusercontent.com/msynk/git-file-history/main/images/screenshot-4.png)
+
+Once a commit is marked, every other row offers **Compare with `<sha>`**, and a `compare base` chip above the list shows what is marked.
+
+![A second commit offering Compare with the marked base commit, with the compare base chip above the list.](https://raw.githubusercontent.com/msynk/git-file-history/main/images/screenshot-6.png)
+
+The button at the end of each row opens the other half of the story: every file
+the commit touched, with its status and line counts, and the file being followed
+picked out among them. Selecting any of them diffs it against the parent commit,
+so a one-line change can be read next to the rest of the work it belongs to.
+Commits touching more than 500 files are cut off there, and the list says so.
+
+![The list of every file changed in a commit, with status letters and line counts, the followed file in bold.](https://raw.githubusercontent.com/msynk/git-file-history/main/images/screenshot-5.png)
 
 ## Settings
 

@@ -1,4 +1,4 @@
-import type { CommitEntry, FileChangeStatus, RefInfo, RefKind } from './types';
+import type { CommitDetail, CommitEntry, CommitFileChange, FileChangeStatus, RefInfo, RefKind } from './types';
 
 /** Field separator inside a commit header. `git log` never emits it itself. */
 const FIELD = '\x1f';
@@ -76,7 +76,18 @@ function parseRecord(record: string, fallbackPath: string): CommitEntry | undefi
   if (headerEnd === -1) {
     return undefined;
   }
-  const fields = splitHeader(record.slice(0, headerEnd));
+  const header = parseHeader(record.slice(0, headerEnd));
+  if (!header) {
+    return undefined;
+  }
+  return { ...header, ...parseChange(record.slice(headerEnd + 1), fallbackPath) };
+}
+
+/** The commit metadata shared by a single-file log entry and a whole commit. */
+type CommitHeader = Omit<CommitEntry, 'path' | 'previousPath' | 'status' | 'insertions' | 'deletions'>;
+
+function parseHeader(header: string): CommitHeader | undefined {
+  const fields = splitHeader(header);
   if (fields.length < HEADER_FIELD_COUNT) {
     return undefined;
   }
@@ -96,7 +107,6 @@ function parseRecord(record: string, fallbackPath: string): CommitEntry | undefi
   ] = fields;
 
   const { subject, body } = splitMessage(message);
-  const change = parseChange(record.slice(headerEnd + 1), fallbackPath);
 
   return {
     hash,
@@ -110,9 +120,114 @@ function parseRecord(record: string, fallbackPath: string): CommitEntry | undefi
     commitDate: Number(commitDate) * 1000,
     subject,
     body,
-    refs: parseRefs(decorations),
-    ...change
+    refs: parseRefs(decorations)
   };
+}
+
+/**
+ * Parses the single record produced by `git log -1` with {@link LOG_FORMAT},
+ * keeping every file the commit touched instead of only the one being followed.
+ *
+ * @param limit Most files to keep. A larger commit is reported as truncated
+ * rather than silently shortened, so the view can say what it left out.
+ */
+export function parseCommitDetail(stdout: string, limit = Number.POSITIVE_INFINITY): CommitDetail | undefined {
+  const start = stdout.indexOf(RECORD);
+  if (start === -1) {
+    return undefined;
+  }
+  // `-m` can emit one record per parent; only the first-parent diff is wanted.
+  const next = stdout.indexOf('\x00' + RECORD, start + 1);
+  const record = stdout.slice(start + RECORD.length, next === -1 ? undefined : next + 1);
+
+  const headerEnd = record.indexOf('\x00');
+  if (headerEnd === -1) {
+    return undefined;
+  }
+  const header = parseHeader(record.slice(0, headerEnd));
+  if (!header) {
+    return undefined;
+  }
+
+  const files = parseChanges(record.slice(headerEnd + 1));
+  return {
+    ...header,
+    fileCount: files.length,
+    files: files.length > limit ? files.slice(0, limit) : files,
+    truncated: files.length > limit || undefined
+  };
+}
+
+/**
+ * Reads the `--raw` and `--numstat` sections of a commit that was not narrowed
+ * to one path, so every file it touched comes back.
+ *
+ * git emits the whole raw section first and the whole numstat section after it,
+ * so the statuses are collected on the first pass and the line counts matched
+ * onto them by path on the second.
+ */
+function parseChanges(section: string): CommitFileChange[] {
+  const tokens = section.replace(/^\n/, '').split('\x00');
+  const changes: CommitFileChange[] = [];
+  const byPath = new Map<string, CommitFileChange>();
+
+  let index = 0;
+  while (index < tokens.length && tokens[index].startsWith(':')) {
+    const entry = tokens[index];
+    const status = statusFromLetter(entry.slice(entry.lastIndexOf(' ') + 1));
+    let path = tokens[index + 1] ?? '';
+    let previousPath: string | undefined;
+    index += 2;
+    if (status === 'renamed') {
+      previousPath = path;
+      path = tokens[index] ?? path;
+      index += 1;
+    }
+    if (!path) {
+      continue;
+    }
+    const change: CommitFileChange = { path, previousPath, status };
+    changes.push(change);
+    byPath.set(path, change);
+  }
+
+  for (; index < tokens.length; index++) {
+    const parts = tokens[index].split('\t');
+    if (parts.length < 3) {
+      continue;
+    }
+    // A dash means git treated the blob as binary and counted no lines.
+    const insertions = parts[0] === '-' ? undefined : Number(parts[0]);
+    const deletions = parts[1] === '-' ? undefined : Number(parts[1]);
+    let path = parts.slice(2).join('\t');
+    let previousPath: string | undefined;
+    if (path === '') {
+      // A rename moves both paths into their own NUL-terminated tokens.
+      previousPath = tokens[index + 1] ?? '';
+      path = tokens[index + 2] ?? '';
+      index += 2;
+    }
+    if (!path) {
+      continue;
+    }
+    const existing = byPath.get(path);
+    if (existing) {
+      existing.insertions = insertions;
+      existing.deletions = deletions;
+      continue;
+    }
+    // No raw entry for this path: fall back to what numstat alone can tell us.
+    changes.push({
+      path,
+      previousPath: previousPath || undefined,
+      status: previousPath ? 'renamed' : 'modified',
+      insertions,
+      deletions
+    });
+    byPath.set(path, changes[changes.length - 1]);
+  }
+
+  return changes;
 }
 
 /**

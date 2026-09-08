@@ -2,7 +2,7 @@ import * as assert from 'assert';
 import * as fs from 'fs';
 import { JSDOM } from 'jsdom';
 import * as path from 'path';
-import type { CommitEntry } from '../../src/git/types';
+import type { CommitDetail, CommitEntry } from '../../src/git/types';
 import type { FileContext, FromWebview, PreviewResult, ToWebview } from '../../src/ui/protocol';
 
 /**
@@ -45,6 +45,11 @@ function commit(overrides: Partial<CommitEntry> = {}): CommitEntry {
     deletions: 2,
     ...overrides
   };
+}
+
+function commitDetail(overrides: Partial<CommitDetail> = {}): CommitDetail {
+  const { path, previousPath, status, insertions, deletions, ...header } = commit();
+  return { ...header, files: [], fileCount: 0, ...overrides };
 }
 
 function preview(overrides: Partial<PreviewResult> = {}): PreviewResult {
@@ -273,6 +278,7 @@ describe('webview', () => {
     const labels = Array.from(harness.document.querySelectorAll('.detail .action')).map((node) => node.textContent);
     assert.deepStrictEqual(labels, [
       'Open diff',
+      'Select for compare',
       'Open file at this commit',
       'Compare with working tree',
       'Copy SHA',
@@ -301,6 +307,88 @@ describe('webview', () => {
     ) as HTMLElement;
     copySha.click();
     assert.deepStrictEqual(lastSent(harness), { type: 'copySha', hash: '1'.repeat(40) });
+  });
+
+  it('marks a compare base and diffs it against another commit with Ctrl+Enter', () => {
+    const harness = createHarness();
+    seed(harness, [commit({ hash: '1'.repeat(40) }), commit({ hash: '2'.repeat(40), subject: 'Older' })]);
+    const list = harness.document.querySelector('.list') as HTMLElement;
+
+    key(harness, list, { key: 'ArrowDown' });
+    key(harness, list, { key: 'c' });
+    assert.strictEqual(harness.rows()[0].dataset.compareBase, 'true');
+    assert.strictEqual(harness.rows()[0].querySelector('.compare-tag')?.textContent, 'compare base');
+    assert.ok(harness.text('.chip-row').includes('Compare base: 1111111'));
+
+    key(harness, list, { key: 'ArrowDown' });
+    key(harness, list, { key: 'Enter', ctrlKey: true });
+    assert.deepStrictEqual(lastSent(harness), {
+      type: 'compareCommits',
+      base: '1'.repeat(40),
+      target: '2'.repeat(40)
+    });
+  });
+
+  it('keeps plain Enter on the diff against the parent even with a base marked', () => {
+    const harness = createHarness();
+    seed(harness, [commit({ hash: '1'.repeat(40) }), commit({ hash: '2'.repeat(40) })]);
+    const list = harness.document.querySelector('.list') as HTMLElement;
+
+    key(harness, list, { key: 'ArrowDown' });
+    key(harness, list, { key: 'c' });
+    key(harness, list, { key: 'ArrowDown' });
+    key(harness, list, { key: 'Enter' });
+    assert.deepStrictEqual(lastSent(harness), { type: 'openDiff', hash: '2'.repeat(40) });
+  });
+
+  it('offers the comparison from the detail pane once a base is marked', () => {
+    const harness = createHarness();
+    seed(harness, [commit({ hash: '1'.repeat(40) }), commit({ hash: '2'.repeat(40) })]);
+    const list = harness.document.querySelector('.list') as HTMLElement;
+
+    key(harness, list, { key: 'ArrowDown' });
+    key(harness, list, { key: 'c' });
+    harness.rows()[1].dispatchEvent(new harness.window.MouseEvent('click', { bubbles: true }));
+
+    const compare = Array.from(harness.document.querySelectorAll('.detail .action')).find(
+      (node) => node.textContent === 'Compare with 1111111'
+    ) as HTMLElement;
+    assert.ok(compare, 'expected a compare action naming the base');
+    compare.click();
+    assert.deepStrictEqual(lastSent(harness), {
+      type: 'compareCommits',
+      base: '1'.repeat(40),
+      target: '2'.repeat(40)
+    });
+  });
+
+  it('marks the base on alt-click without changing the selection', () => {
+    const harness = createHarness();
+    seed(harness, [commit({ hash: '1'.repeat(40) }), commit({ hash: '2'.repeat(40) })]);
+
+    harness.rows()[1].dispatchEvent(new harness.window.MouseEvent('click', { bubbles: true, altKey: true }));
+    assert.strictEqual(harness.rows()[1].dataset.compareBase, 'true');
+    assert.strictEqual(harness.rows()[1].getAttribute('aria-selected'), 'false');
+    assert.strictEqual(harness.document.querySelector('.detail'), null);
+  });
+
+  it('clears the base when the commit leaves the list', () => {
+    const harness = createHarness();
+    seed(harness, [commit({ hash: '1'.repeat(40) }), commit({ hash: '2'.repeat(40) })]);
+    const list = harness.document.querySelector('.list') as HTMLElement;
+
+    key(harness, list, { key: 'ArrowDown' });
+    key(harness, list, { key: 'c' });
+    harness.receive({
+      type: 'commits',
+      commits: [commit({ hash: '3'.repeat(40) })],
+      hasMore: false,
+      append: false,
+      token: 2
+    });
+
+    assert.ok(!harness.text('.chip-row').includes('Compare base'));
+    assert.strictEqual(harness.document.querySelector('.compare-tag'), null);
   });
 
   it('appends a page instead of re-rendering the list', () => {
@@ -556,6 +644,188 @@ describe('webview', () => {
     assert.strictEqual(harness.document.querySelectorAll('.commit-subject img').length, 0);
     assert.strictEqual(harness.text('.commit-subject'), '<img src=x onerror="alert(1)">');
   });
+
+  it('asks for every file in the commit when the row action is used', () => {
+    const harness = createHarness();
+    seed(harness, [commit({ hash: '1'.repeat(40) })]);
+
+    rowAction(harness, 0).click();
+
+    assert.deepStrictEqual(lastSent(harness), { type: 'commitDetail', hash: '1'.repeat(40) });
+    assert.ok(harness.text('.commit-files').includes('Reading the commit'));
+  });
+
+  it('opens the file list with F and keeps the buttons out of the tab order', () => {
+    const harness = createHarness();
+    seed(harness, [commit({ hash: '1'.repeat(40) })]);
+    const list = harness.document.querySelector('.list') as HTMLElement;
+
+    key(harness, list, { key: 'ArrowDown' });
+    key(harness, list, { key: 'F' });
+    assert.deepStrictEqual(lastSent(harness), { type: 'commitDetail', hash: '1'.repeat(40) });
+    assert.ok(harness.document.querySelector('.commit-files'));
+
+    // Ctrl+F belongs to the search box, so it must leave the list alone.
+    key(harness, list, { key: 'F', ctrlKey: true });
+    assert.ok(harness.document.querySelector('.commit-files'));
+
+    key(harness, list, { key: 'F' });
+    assert.strictEqual(harness.document.querySelector('.commit-files'), null, 'F closes what F opened');
+
+    // A button per row would otherwise put a page of stops in the tab order.
+    assert.strictEqual(rowAction(harness, 0).getAttribute('tabindex'), '-1');
+  });
+
+  it('keeps the focus on a row it rebuilds under the user', () => {
+    // Clicking a row focuses it. Rebuilding the row to redraw its state used to
+    // drop the focus to the body, which greyed the selection out and left the
+    // keyboard with nothing to talk to.
+    const harness = createHarness();
+    seed(harness, [commit({ hash: '1'.repeat(40) })]);
+    const row = harness.rows()[0];
+    row.focus();
+    row.dispatchEvent(new harness.window.MouseEvent('click', { bubbles: true }));
+
+    rowAction(harness, 0).click();
+
+    const rebuilt = harness.rows()[0];
+    assert.strictEqual(harness.document.activeElement, rebuilt);
+    assert.strictEqual(rebuilt.getAttribute('aria-selected'), 'true');
+  });
+
+  it('lists the whole commit and marks the file the history is following', () => {
+    const harness = createHarness();
+    seed(harness, [commit({ hash: '1'.repeat(40), path: 'src/parser.ts' })]);
+    rowAction(harness, 0).click();
+
+    harness.receive({
+      type: 'commitDetail',
+      result: {
+        hash: '1'.repeat(40),
+        detail: commitDetail({
+          files: [
+            { path: 'src/parser.ts', status: 'modified', insertions: 4, deletions: 2 },
+            { path: 'src/lexer.ts', status: 'added', insertions: 10, deletions: 0 }
+          ],
+          fileCount: 2
+        })
+      }
+    });
+
+    const entries = Array.from(harness.document.querySelectorAll('.file-entry')) as HTMLElement[];
+    assert.strictEqual(entries.length, 2);
+    assert.ok(harness.text('.commit-files-head').includes('2 files changed'));
+    assert.strictEqual(entries[0].querySelector('.path-name')?.textContent, 'parser.ts');
+    assert.strictEqual(entries[0].querySelector('.path-dir')?.textContent, 'src/');
+    assert.ok(entries[0].classList.contains('is-current'), 'the followed file should stand out');
+    assert.ok(!entries[1].classList.contains('is-current'));
+    assert.strictEqual(entries[1].querySelector('.file-status')?.textContent, 'A');
+  });
+
+  it('diffs one of the other files in the commit', () => {
+    const harness = createHarness();
+    seed(harness, [commit({ hash: '1'.repeat(40) })]);
+    rowAction(harness, 0).click();
+    harness.receive({
+      type: 'commitDetail',
+      result: {
+        hash: '1'.repeat(40),
+        detail: commitDetail({
+          files: [{ path: 'docs/readme.md', previousPath: 'README.md', status: 'renamed' }],
+          fileCount: 1
+        })
+      }
+    });
+
+    (harness.document.querySelector('.file-entry') as HTMLElement).click();
+    assert.deepStrictEqual(lastSent(harness), {
+      type: 'openCommitFileDiff',
+      hash: '1'.repeat(40),
+      path: 'docs/readme.md',
+      previousPath: 'README.md',
+      status: 'renamed'
+    });
+  });
+
+  it('does not refetch a commit whose files it already has', () => {
+    const harness = createHarness();
+    seed(harness, [commit({ hash: '1'.repeat(40) })]);
+    rowAction(harness, 0).click();
+    harness.receive({
+      type: 'commitDetail',
+      result: { hash: '1'.repeat(40), detail: commitDetail({ files: [], fileCount: 0 }) }
+    });
+
+    rowAction(harness, 0).click();
+    assert.strictEqual(harness.document.querySelector('.commit-files'), null, 'the second click should close it');
+
+    const before = harness.sent.length;
+    rowAction(harness, 0).click();
+    assert.ok(harness.document.querySelector('.commit-files'));
+    assert.ok(
+      !harness.sent.slice(before).some((message) => message.type === 'commitDetail'),
+      'the cached answer should be reused'
+    );
+  });
+
+  it('explains a commit git could not read', () => {
+    const harness = createHarness();
+    seed(harness, [commit({ hash: '1'.repeat(40) })]);
+    rowAction(harness, 0).click();
+    harness.receive({ type: 'commitDetail', result: { hash: '1'.repeat(40), error: 'bad object' } });
+
+    assert.strictEqual(harness.text('.commit-files-note'), 'bad object');
+  });
+
+  it('says when a commit was too large to list in full', () => {
+    const harness = createHarness();
+    seed(harness, [commit({ hash: '1'.repeat(40) })]);
+    rowAction(harness, 0).click();
+    harness.receive({
+      type: 'commitDetail',
+      result: {
+        hash: '1'.repeat(40),
+        detail: commitDetail({
+          files: [{ path: 'a.ts', status: 'modified', insertions: 1, deletions: 0 }],
+          fileCount: 900,
+          truncated: true
+        })
+      }
+    });
+
+    assert.ok(harness.text('.commit-files-note').includes('first 1 of 900'));
+  });
+
+  it('closes the file list when the detail pane moves to another commit', () => {
+    const harness = createHarness();
+    seed(harness, [commit({ hash: '1'.repeat(40) }), commit({ hash: '2'.repeat(40) })]);
+    rowAction(harness, 0).click();
+    harness.receive({
+      type: 'commitDetail',
+      result: { hash: '1'.repeat(40), detail: commitDetail({ files: [], fileCount: 0 }) }
+    });
+    assert.ok(harness.document.querySelector('.commit-files'));
+
+    key(harness, harness.document.querySelector('.list')!, { key: 'ArrowDown' });
+    assert.strictEqual(harness.document.querySelector('.commit-files'), null);
+    assert.strictEqual(rowAction(harness, 0).getAttribute('aria-pressed'), 'false');
+  });
+
+  it('ignores a file list for a commit the user has already closed', () => {
+    const harness = createHarness();
+    seed(harness, [commit({ hash: '1'.repeat(40) })]);
+    rowAction(harness, 0).click();
+    rowAction(harness, 0).click();
+
+    harness.receive({
+      type: 'commitDetail',
+      result: {
+        hash: '1'.repeat(40),
+        detail: commitDetail({ files: [{ path: 'a.ts', status: 'modified' }], fileCount: 1 })
+      }
+    });
+    assert.strictEqual(harness.document.querySelector('.commit-files'), null);
+  });
 });
 
 /**
@@ -564,6 +834,11 @@ describe('webview', () => {
  */
 function plain<T>(value: T): T {
   return JSON.parse(JSON.stringify(value ?? null));
+}
+
+/** The button on a row that opens everything the commit changed. */
+function rowAction(harness: Harness, index: number): HTMLElement {
+  return harness.rows()[index].querySelector('.row-action') as HTMLElement;
 }
 
 function lastSent(harness: Harness): unknown {

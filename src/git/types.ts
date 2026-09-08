@@ -85,3 +85,39 @@ export interface HistoryQuery {
   /** Server-side search executed by git across the whole history. */
   search?: HistorySearch;
 }
+
+/** One file touched by a commit, as reported by `--raw --numstat`. */
+export interface CommitFileChange {
+  /** Path after the change, relative to the repository root. */
+  path: string;
+  /** Path before a rename, otherwise `undefined`. */
+  previousPath?: string;
+  status: FileChangeStatus;
+  /** Added lines, or `undefined` for binary files. */
+  insertions?: number;
+  /** Removed lines, or `undefined` for binary files. */
+  deletions?: number;
+}
+
+/** A whole commit: its metadata plus every file it touched. */
+export interface CommitDetail {
+  hash: string;
+  shortHash: string;
+  parents: string[];
+  authorName: string;
+  authorEmail: string;
+  /** Author time, milliseconds since epoch. */
+  authorDate: number;
+  committerName: string;
+  committerEmail: string;
+  /** Commit time, milliseconds since epoch. */
+  commitDate: number;
+  subject: string;
+  body: string;
+  refs: RefInfo[];
+  files: CommitFileChange[];
+  /** Total files the commit touched, which may exceed `files.length`. */
+  fileCount: number;
+  /** True when `files` was cut short of `fileCount`. */
+  truncated?: boolean;
+}

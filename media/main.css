@@ -337,6 +337,22 @@ body {
   outline-offset: -1px;
 }
 
+/* The commit held as the left side of a two-commit comparison. */
+.commit[data-compare-base='true'] {
+  box-shadow: inset 2px 0 0 var(--vscode-textLink-foreground);
+}
+
+.compare-tag {
+  flex: 0 0 auto;
+  padding: 0 5px;
+  border-radius: 3px;
+  border: 1px solid currentColor;
+  color: var(--vscode-textLink-foreground);
+  font-size: 0.82em;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
 /* The timeline rail: a hairline behind every dot, trimmed at both ends. */
 .rail {
   position: relative;
@@ -617,6 +633,139 @@ body {
 .action svg {
   width: 14px;
   height: 14px;
+}
+
+/* The per-row button that opens the whole commit, not just this one file. */
+.row-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  /* Negative block margins keep the button from growing the row's meta line. */
+  margin: -2px 0 -2px auto;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  color: inherit;
+  background: none;
+  border: none;
+  border-radius: var(--gfh-radius);
+  cursor: pointer;
+  /* Dimmed rather than hidden: it has to be findable without hovering first. */
+  opacity: 0.55;
+}
+
+.commit:hover .row-action,
+.commit[aria-selected='true'] .row-action,
+.row-action:focus-visible,
+.row-action[aria-pressed='true'] {
+  opacity: 1;
+}
+
+.row-action:hover {
+  background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.22));
+}
+
+.row-action:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
+}
+
+.row-action[aria-pressed='true'] {
+  color: var(--vscode-textLink-foreground);
+}
+
+/* ------------------------------------------------- files in one commit -- */
+
+.commit-files {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--gfh-border);
+}
+
+.commit-files-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 4px;
+  color: var(--gfh-muted);
+  font-size: 0.92em;
+}
+
+.commit-files-note {
+  margin: 6px 0 0;
+  color: var(--gfh-muted);
+  font-size: 0.92em;
+}
+
+.file-list {
+  display: flex;
+  flex-direction: column;
+  /* Long commits scroll inside the detail instead of burying the next row. */
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.file-entry {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 3px 6px;
+  color: inherit;
+  background: none;
+  border: none;
+  border-radius: var(--gfh-radius);
+  font-family: inherit;
+  font-size: 0.92em;
+  text-align: left;
+  cursor: pointer;
+}
+
+.file-entry:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+
+.file-entry:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
+}
+
+/* The file whose history is on screen, so it stands out among its siblings. */
+.file-entry.is-current .path-name {
+  font-weight: 600;
+}
+
+.file-status {
+  flex: 0 0 auto;
+  width: 12px;
+  font-family: var(--vscode-editor-font-family, monospace);
+  text-align: center;
+  opacity: 0.9;
+}
+
+.file-status[data-status='added'] {
+  color: var(--gfh-added);
+}
+
+.file-status[data-status='deleted'] {
+  color: var(--gfh-deleted);
+}
+
+.file-status[data-status='renamed'] {
+  color: var(--gfh-renamed);
+}
+
+.file-path {
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.path-dir {
+  color: var(--gfh-muted);
 }
 
 kbd {

@@ -1,5 +1,5 @@
 import * as assert from 'assert';
-import { LOG_FORMAT, parseLog, parseRefs } from '../../src/git/parseLog';
+import { LOG_FORMAT, parseCommitDetail, parseLog, parseRefs } from '../../src/git/parseLog';
 
 /** Builds a record the way `git log -z --raw --numstat` would emit it. */
 function record(options: {
@@ -170,5 +170,66 @@ describe('parseRefs', () => {
       { kind: 'head', name: 'HEAD' },
       { kind: 'tag', name: 'v2' }
     ]);
+  });
+});
+
+describe('parseCommitDetail', () => {
+  /** The raw and numstat sections git emits for a commit touching four files. */
+  const DIFF =
+    '\n' +
+    ':000000 100644 000 aaa A\x00added.txt\x00' +
+    ':100644 000000 bbb 000 D\x00blob.bin\x00' +
+    ':100644 100644 ccc ccc R100\x00old.txt\x00dir/new name.txt\x00' +
+    ':100644 100644 ddd eee M\x00keep.txt\x00' +
+    '1\t0\tadded.txt\x00' +
+    '-\t-\tblob.bin\x00' +
+    '0\t0\t\x00old.txt\x00dir/new name.txt\x00' +
+    '3\t1\tkeep.txt\x00';
+
+  it('returns nothing for output git produced no record for', () => {
+    assert.strictEqual(parseCommitDetail(''), undefined);
+    assert.strictEqual(parseCommitDetail('not a record'), undefined);
+  });
+
+  it('keeps every file the commit touched, with its status and line counts', () => {
+    const detail = parseCommitDetail(record({ message: 'Restructure', diff: DIFF }));
+
+    assert.ok(detail);
+    assert.strictEqual(detail!.subject, 'Restructure');
+    assert.strictEqual(detail!.fileCount, 4);
+    assert.deepStrictEqual(detail!.files, [
+      { path: 'added.txt', previousPath: undefined, status: 'added', insertions: 1, deletions: 0 },
+      { path: 'blob.bin', previousPath: undefined, status: 'deleted', insertions: undefined, deletions: undefined },
+      { path: 'dir/new name.txt', previousPath: 'old.txt', status: 'renamed', insertions: 0, deletions: 0 },
+      { path: 'keep.txt', previousPath: undefined, status: 'modified', insertions: 3, deletions: 1 }
+    ]);
+    assert.strictEqual(detail!.truncated, undefined);
+  });
+
+  it('caps a huge commit and says it did', () => {
+    const detail = parseCommitDetail(record({ message: 'Restructure', diff: DIFF }), 2);
+
+    assert.strictEqual(detail!.files.length, 2);
+    assert.strictEqual(detail!.fileCount, 4);
+    assert.strictEqual(detail!.truncated, true);
+  });
+
+  it('reports a commit that touched nothing', () => {
+    const detail = parseCommitDetail(record({ message: 'Empty merge', diff: '' }));
+
+    assert.deepStrictEqual(detail!.files, []);
+    assert.strictEqual(detail!.fileCount, 0);
+  });
+
+  it('reads only the first-parent record when -m emitted one per parent', () => {
+    const merged =
+      record({ message: 'Merge', diff: '\n:100644 100644 aaa bbb M\x00first.ts\x001\t1\tfirst.ts\x00' }) +
+      record({ message: 'Merge', diff: '\n:100644 100644 aaa bbb M\x00second.ts\x002\t2\tsecond.ts\x00' });
+
+    const detail = parseCommitDetail(merged);
+    assert.deepStrictEqual(
+      detail!.files.map((file) => file.path),
+      ['first.ts']
+    );
   });
 });

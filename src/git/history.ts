@@ -1,7 +1,7 @@
 import * as path from 'path';
 import { GitError, type CancellationLike, type GitExecutor } from './gitExecutor';
-import { LOG_FORMAT, parseLog } from './parseLog';
-import type { HistoryPage, HistoryQuery } from './types';
+import { LOG_FORMAT, parseCommitDetail, parseLog } from './parseLog';
+import type { CommitDetail, HistoryPage, HistoryQuery } from './types';
 
 /**
  * The git commands behind the view. Deliberately free of any `vscode` import so
@@ -56,6 +56,27 @@ export async function loadHistoryPage(
     // that point, so a rename inside this page does not break the cursor.
     cursor: { fromRef: next.hash, path: next.path || walkPath }
   };
+}
+
+/**
+ * Loads one commit in full: its metadata and every file it touched, not just
+ * the file whose history is on screen.
+ *
+ * `-m --first-parent` makes a merge report the changes it brought in relative
+ * to its first parent; without it `git log` shows a merge as touching nothing.
+ */
+export async function readCommitDetail(
+  executor: GitExecutor,
+  root: string,
+  hash: string,
+  limit: number,
+  token?: CancellationLike
+): Promise<CommitDetail | undefined> {
+  const stdout = await executor.run(
+    ['log', '-1', `--format=${LOG_FORMAT}`, '-z', '--raw', '--numstat', '-m', '--first-parent', hash, '--'],
+    { cwd: root, token }
+  );
+  return parseCommitDetail(stdout, limit);
 }
 
 /**
