@@ -3,10 +3,14 @@
 All notable changes to Git File History View are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [1.2.0] - 2026-09-08
 
 ### Added
 
+- Compare any two commits: mark one with <kbd>C</kbd>, <kbd>Alt</kbd>+click or
+  **Select for compare**, then diff another against it with
+  <kbd>Ctrl</kbd>+<kbd>Enter</kbd> or **Compare with `<sha>`**. The pair is
+  ordered oldest-first and follows the file across renames.
 - Whole-commit view: <kbd>F</kbd>, or the button at the end of every row, lists
   all the files that commit touched - not just the one being followed - with
   each file's status and line counts. Selecting a file opens its diff against
@@ -23,10 +27,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Clicking a row and then changing its state (marking a compare base, opening
   the file list) no longer drops the focus, which greyed out the selection and
   left the keyboard shortcuts with nothing to act on.
-- Compare any two commits: mark one with <kbd>C</kbd>, <kbd>Alt</kbd>+click or
-  **Select for compare**, then diff another against it with
-  <kbd>Ctrl</kbd>+<kbd>Enter</kbd> or **Compare with `<sha>`**. The pair is
-  ordered oldest-first and follows the file across renames.
 
 ## [1.1.0] - 2026-09-07
 
